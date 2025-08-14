@@ -1,0 +1,16 @@
+{
+  "total": 300,
+  "answers": 196,
+  "asks": 600,
+  "searches": 0,
+  "confident_answers": 0,
+  "accuracy": 0.653,
+  "avg_asks": 2.0,
+  "avg_searches": 0.0,
+  "targets": {
+    "accuracy>=": 0.85,
+    "avg_asks<=": 3.0,
+    "avg_searches<=": 0.7
+  },
+  "pass": false
+}

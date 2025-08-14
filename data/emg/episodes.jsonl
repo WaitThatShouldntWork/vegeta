@@ -1,0 +1,6 @@
+{"task": "identify_film", "target": "Spirited Away", "known": {"GenreCluster": "Animation"}}
+{"task": "identify_film", "target": "Parasite", "known": {"Country": "South Korea"}}
+{"task": "identify_film", "target": "The Godfather", "known": {"Era": "1970s"}}
+{"task": "identify_film", "target": "Inception", "known": {"Studio": "Warner Bros."}}
+{"task": "identify_film", "target": "Pan's Labyrinth", "known": {"Country": "Spain"}}
+

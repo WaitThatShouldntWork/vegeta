@@ -1,0 +1,54 @@
+{
+  "actions": [
+    "answer",
+    "ask",
+    "search"
+  ],
+  "weights": {
+    "answer": {
+      "bias": 1.6665199999996325,
+      "risk": 0.5844012000000172,
+      "kev_flag": 0.3,
+      "epss": 0.3,
+      "cvss_norm": 0.16880239999999894,
+      "entropy": 1.716519999999617,
+      "centrality": 0.0,
+      "slot_actively_exploited": 0.0,
+      "slot_epss_high": 0.0,
+      "slot_severity_high": 0.2049999999999997,
+      "ask_eig_heur": 0.34330399999996775,
+      "bayes_drop_kev": 0.5115229599999036,
+      "bayes_drop_epss": 0.10017507999997835
+    },
+    "ask": {
+      "bias": -3.4530399999992274,
+      "entropy": -3.1330399999993275,
+      "ask_eig_heur": -0.48660800000007803,
+      "bayes_drop_kev": -0.8230459199998791,
+      "bayes_drop_epss": -0.0003501599999569828,
+      "cvss_norm": -0.3376047999999979,
+      "epss": 0.0,
+      "kev_flag": 0.0,
+      "risk": -0.16880239999999894,
+      "centrality": 0.0,
+      "slot_actively_exploited": 0.0,
+      "slot_epss_high": 0.0,
+      "slot_severity_high": -0.4099999999999994
+    },
+    "search": {
+      "bias": 1.5165199999996801,
+      "cvss_norm": 0.16880239999999894,
+      "epss": 0.0,
+      "kev_flag": 0.0,
+      "risk": 0.08440119999999947,
+      "entropy": 1.716519999999617,
+      "centrality": 0.0,
+      "slot_actively_exploited": 0.0,
+      "slot_epss_high": 0.0,
+      "slot_severity_high": 0.2049999999999997,
+      "ask_eig_heur": 0.34330399999996775,
+      "bayes_drop_kev": 0.5115229599999036,
+      "bayes_drop_epss": 0.10017507999997835
+    }
+  }
+}

@@ -1,0 +1,47 @@
+labels:
+  core:
+    - Entity
+    - Attribute
+    - Event
+    - Procedure
+    - Policy
+  domain:
+    - CVE
+    - Product
+    - Vendor
+    - Technique
+    - Mitigation
+
+relationship_types:
+  - IS_A
+  - SUBCLASS_OF
+  - PART_OF
+  - LOCATED_IN
+  - USES
+  - HAS_PROPERTY
+  - RELATED_TO
+  - CAUSES
+  - MITIGATES
+  - REQUIRES
+  - ALLOWS
+  - PROHIBITS
+  - HAS_STEP
+  - NEXT_IF
+  - APPLIES_TO
+  - AFFECTS
+
+node_properties:
+  Entity:
+    - id
+    - name
+    - created_at
+  Event:
+    - date
+    - source
+  CVE:
+    - id
+    - cvss
+    - epss
+    - kev_flag
+
+

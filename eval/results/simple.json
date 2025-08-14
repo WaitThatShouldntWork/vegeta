@@ -1,0 +1,15 @@
+{
+  "total": 300,
+  "answers": 300,
+  "asks": 0,
+  "searches": 0,
+  "answer_rate": 1.0,
+  "avg_asks": 0.0,
+  "avg_searches": 0.0,
+  "targets": {
+    "answer_rate>=": 0.2,
+    "avg_asks<=": 3.0,
+    "avg_searches<=": 0.7
+  },
+  "pass": true
+}

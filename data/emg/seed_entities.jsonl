@@ -1,0 +1,9 @@
+{"type": "Film", "name": "Spirited Away", "wikidata_id": "Q220677", "slots": {"GenreCluster": "Animation", "Era": "2000s", "Country": "Japan", "Studio": "Studio Ghibli", "AwardsSignal": "High"}}
+{"type": "Film", "name": "Parasite", "wikidata_id": "Q6863143", "slots": {"GenreCluster": "Thriller", "Era": "2010s", "Country": "South Korea", "Studio": "Barunson E&A", "AwardsSignal": "High"}}
+{"type": "Film", "name": "The Godfather", "wikidata_id": "Q47703", "slots": {"GenreCluster": "Crime", "Era": "1970s", "Country": "United States", "Studio": "Paramount Pictures", "AwardsSignal": "High"}}
+{"type": "Film", "name": "My Neighbor Totoro", "wikidata_id": "Q256757", "slots": {"GenreCluster": "Animation", "Era": "1980s", "Country": "Japan", "Studio": "Studio Ghibli", "AwardsSignal": "Medium"}}
+{"type": "Film", "name": "Inception", "wikidata_id": "Q43361", "slots": {"GenreCluster": "Sci-Fi", "Era": "2010s", "Country": "United States", "Studio": "Warner Bros.", "AwardsSignal": "High"}}
+{"type": "Film", "name": "Pan's Labyrinth", "wikidata_id": "Q215552", "slots": {"GenreCluster": "Fantasy", "Era": "2000s", "Country": "Spain", "Studio": "Estudios Picasso", "AwardsSignal": "High"}}
+{"type": "Film", "name": "Titanic", "wikidata_id": "Q44578", "slots": {"GenreCluster": "Romance", "Era": "1990s", "Country": "United States", "Studio": "20th Century Fox", "AwardsSignal": "High"}}
+{"type": "Film", "name": "The Dark Knight", "wikidata_id": "Q157443", "slots": {"GenreCluster": "Action", "Era": "2000s", "Country": "United States", "Studio": "Warner Bros.", "AwardsSignal": "High"}}
+
