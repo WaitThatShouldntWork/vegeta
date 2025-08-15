@@ -45,6 +45,55 @@ def fact_exists(*, subject_name: str, relation_name: str, object_name: str) -> b
 		return bool(row and (row["c"] or 0) > 0)
 
 
+def upsert_entity_with_type(*, entity_name: str, type_name: str) -> Dict[str, Any] | None:
+	"""Ensure an Entity exists and is linked to a Type via INSTANCE_OF."""
+	driver = get_driver()
+	if driver is None:
+		return None
+	q = """
+	MERGE (t:Type {name:$type})
+	MERGE (e:Entity {name:$name})
+	MERGE (e)-[:INSTANCE_OF]->(t)
+	RETURN elementId(e) AS entity_id, elementId(t) AS type_id
+	"""
+	with driver.session() as session:
+		row = session.run(q, name=entity_name, type=type_name).single()
+		return {"entity_id": row["entity_id"], "type_id": row["type_id"], "name": entity_name, "type": type_name}
+
+
+def upsert_slot_value(*, entity_name: str, slot: str, value: str, confidence: float = 0.9, source: str = "seed") -> Dict[str, Any] | None:
+	"""Attach (or create) a SlotValue and HAS_SLOT edge with confidence and source."""
+	driver = get_driver()
+	if driver is None:
+		return None
+	q = """
+	MERGE (e:Entity {name:$name})
+	MERGE (sv:SlotValue {slot:$slot, value:$value})
+	MERGE (e)-[hs:HAS_SLOT]->(sv)
+	ON CREATE SET hs.confidence=$conf, hs.source=$source
+	ON MATCH SET hs.confidence = CASE WHEN coalesce(hs.confidence,0) < $conf THEN $conf ELSE hs.confidence END
+	RETURN elementId(e) AS entity_id, elementId(sv) AS slot_id
+	"""
+	with driver.session() as session:
+		row = session.run(q, name=entity_name, slot=slot, value=value, conf=float(confidence), source=source).single()
+		return {"entity_id": row["entity_id"], "slot_id": row["slot_id"], "slot": slot, "value": value}
+
+
+def has_slot_value(*, entity_name: str, slot: str, min_confidence: float = 0.7) -> bool:
+	"""Return True if entity has a HAS_SLOT to SlotValue(slot, any value) with confidence >= min_confidence."""
+	driver = get_driver()
+	if driver is None:
+		return False
+	q = """
+	MATCH (e:Entity {name:$name})-[hs:HAS_SLOT]->(sv:SlotValue {slot:$slot})
+	WHERE coalesce(hs.confidence, 0) >= $thr
+	RETURN count(hs) AS c
+	"""
+	with driver.session() as session:
+		row = session.run(q, name=entity_name, slot=slot, thr=float(min_confidence)).single()
+		return bool(row and (row["c"] or 0) > 0)
+
+
 def upsert_document_with_sentence(*, source_url: str, title: str, text_excerpt: str) -> Dict[str, Any] | None:
 	"""Create Document and a single Sentence node (doc-scoped) and return ids. Returns None if no driver."""
 	driver = get_driver()

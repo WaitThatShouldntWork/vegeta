@@ -32,9 +32,11 @@ from policy.bandit import SoftmaxBandit
 from decider.bayes import build_prior_from_signals
 from decider.eig import expected_entropy_drop_bayes
 from retrieval.wikipedia import search_wikipedia
-from db.writeback import upsert_fact_with_source, fact_exists
+from db.writeback import upsert_fact_with_source, fact_exists, has_slot_value
 from agent.question_generator import render_question_from_slot, render_from_domain_pack
 from agent.question_selector import pick_next_slot_by_eig
+from emg.loader import load_seed_entities
+from emg.query import find_films_by_slots
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -518,6 +520,8 @@ def active_loop(
     steps: int = typer.Option(3, "--steps"),
     write_back: bool = typer.Option(False, "--write-back/--no-write-back"),
     use_ollama: bool = typer.Option(False, "--ollama/--no-ollama", help="Use local Ollama for question gen"),
+    early_stop: bool = typer.Option(True, "--early-stop/--no-early-stop", help="Stop if evidence already exists"),
+    assets: Optional[str] = typer.Option(None, "--assets", help="Path to assets JSON (optional)"),
 ) -> None:
     """Minimal uncertainty→question→Wikipedia search loop.
 
@@ -526,15 +530,56 @@ def active_loop(
     """
     from env.interaction import AskEnv
     signals = get_cve_graph_signals(cve) if cve else None
+    resolved = resolve_slots_from_signals(signals) if signals else {}
+    # Optional asset context for template filling
+    asset_name: Optional[str] = None
+    if assets:
+        try:
+            import json as _json
+            with open(assets, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("assets"), list) and data["assets"]:
+                first = data["assets"][0]
+                asset_name = str(first.get("name") or first.get("id") or "asset-1")
+            elif isinstance(data, list) and data:
+                first = data[0]
+                asset_name = str(first.get("name") or first.get("id") or "asset-1") if isinstance(first, dict) else str(first)
+        except Exception:
+            asset_name = None
     env = AskEnv(signals=signals, error_rate=0.1)
     log = []
     asked: list[str] = []
     for i in range(max(1, steps)):
-        slot = pick_next_slot_by_eig(signals=signals, resolved_slots=None, exclude=tuple(asked))
-        question = render_from_domain_pack(slot, context={"cve_id": cve or "unknown", "use_ollama": use_ollama})
-        query = cve or question
-        docs = search_wikipedia(query=query, k=1)
-        top = docs[0] if docs else None
+        already_true = tuple(k for k, v in (resolved or {}).items() if bool(v))
+        # Choose a candidate slot first
+        candidate = pick_next_slot_by_eig(signals=signals, resolved_slots=resolved, exclude=tuple(asked) + already_true)
+        # Skip slots already known in graph (if we have a concrete subject)
+        if cve and candidate in ("actively_exploited", "epss_high", "internet_exposed"):
+            if has_slot_value(entity_name=cve, slot=candidate, min_confidence=0.7):
+                asked.append(candidate)
+                continue
+        slot = candidate
+        question = render_from_domain_pack(slot, context={"cve_id": cve or "unknown", "asset_name": asset_name or "the asset", "use_ollama": use_ollama})
+        # Private vs public slots: ask-only for private; search for public
+        private_slots = {"internet_exposed", "asset_present", "business_critical"}
+        public_slots = {"actively_exploited", "epss_high", "patch_available", "workaround_available"}
+        top = None
+        if slot in public_slots:
+            # Build a slightly more specific query to avoid always hitting the CVE root page
+            query = cve or question
+            if cve:
+                if slot == "actively_exploited":
+                    query = f"{cve} CISA Known Exploited Vulnerabilities"
+                elif slot == "epss_high":
+                    query = f"{cve} EPSS"
+                elif slot == "patch_available":
+                    query = f"{cve} vendor advisory patch"
+                elif slot == "workaround_available":
+                    query = f"{cve} vendor advisory workaround"
+            docs = search_wikipedia(query=query, k=1)
+            top = docs[0] if docs else None
+        else:
+            query = question
         entry = {"step": i + 1, "slot": slot, "question": question, "query": query, "top": (top.metadata if top else None)}
         if write_back and top is not None:
             title = top.metadata.get("title") or "Wikipedia"
@@ -555,6 +600,10 @@ def active_loop(
             entry["write_back"] = wb
         log.append(entry)
         asked.append(slot)
+        if early_stop and isinstance(entry.get("write_back"), dict):
+            # Stop when we either wrote a new fact or confirmed one exists
+            if (not entry["write_back"].get("skipped")) or (entry["write_back"].get("reason") == "exists"):
+                break
     console.print({"cve": cve, "log": log})
 
 
@@ -571,6 +620,273 @@ def bootstrap() -> None:
         console.print("Neo4j not configured or driver missing.")
         raise typer.Exit(code=1)
     console.print({"statements_applied": count})
+
+
+@app.command(name="loop-emg")
+def loop_emg(
+    episodes: Path = typer.Option(Path("data/emg/movie_episodes.jsonl"), "--episodes", help="Path to EMG episodes JSONL"),
+    steps: int = typer.Option(3, "--steps", help="Max steps per episode"),
+    write_back: bool = typer.Option(True, "--write-back/--no-write-back"),
+    save_json: Optional[Path] = typer.Option(None, "--save-json", help="Save per-episode results to JSONL"),
+    save_csv: Optional[Path] = typer.Option(None, "--save-csv", help="Save per-episode results to CSV"),
+    ollama: bool = typer.Option(False, "--ollama/--no-ollama", help="Use local LLM (Ollama) to generate questions"),
+) -> None:
+    """Run a tiny EMG loop over episodes (identify film) and report steps/asks/searches.
+
+    Each episode: {"task":"identify_film","target":"Spirited Away","known":{...}}
+    """
+    import json as _json
+
+    def _iter_jsonl(p: Path):
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if ln:
+                yield _json.loads(ln)
+
+    total = 0
+    total_steps = 0
+    total_asks = 0
+    total_searches = 0
+    successes = 0
+    rows: list[dict[str, Any]] = []
+
+    for ep in _iter_jsonl(episodes):
+        task = ep.get("task")
+        target = str(ep.get("target"))
+        if task == "identify_film":
+            known = ep.get("known") or {}
+            asked: list[str] = []
+            steps_done = 0
+            asks_done = 0
+            searches_done = 0
+            trace: list[Dict[str, Any]] = []
+            # Try graph filter for known slots; if only one candidate remains, count success early
+            candidates = find_films_by_slots(known)
+            if len(candidates) == 1 and candidates[0].lower() == target.lower():
+                total += 1
+                total_steps += 0
+                total_asks += 0
+                total_searches += 0
+                successes += 1
+                rows.append({
+                    "task": task,
+                    "target": target,
+                    "success": True,
+                    "steps": 0,
+                    "asks": 0,
+                    "searches": 0,
+                    "trace": [{"action": "early_success", "reason": "unique_graph_match", "candidates": candidates}],
+                })
+                continue
+            # Simple unknown-first slot order
+            candidate_slots = ("GenreCluster", "Era", "Country", "Studio")
+            unknowns = [s for s in candidate_slots if s not in known]
+            # Step loop
+            success = False
+            for _ in range(max(1, steps)):
+                # If we still have unknowns, ask one; otherwise try a search
+                if unknowns:
+                    slot = unknowns.pop(0)
+                    asked.append(slot)
+                    asks_done += 1
+                    # Generate a question for the slot (LLM when enabled)
+                    try:
+                        from agent.question_generator import llm_generate_question as _llm_q
+                        ctx = {"llm_model": "gemma:4b", "task": task, "known_keys": list(known.keys())}
+                        qtext = _llm_q(slot, context=ctx, use_ollama=ollama)
+                    except Exception:
+                        qtext = f"Provide the film's {slot}."
+                    trace.append({"action": "ask", "slot": slot, "question": qtext})
+                # Always search Wikipedia for the target (acts as our public fact check)
+                query = target
+                docs = search_wikipedia(query=query, k=1)
+                top = docs[0] if docs else None
+                searches_done += 1
+                steps_done += 1
+                trace.append({
+                    "action": "search",
+                    "query": query,
+                    "top_title": (top.metadata.get("title") if top else None),
+                    "top_url": (top.metadata.get("url") if top else None),
+                })
+                if top is not None and write_back:
+                    title = top.metadata.get("title") or "Wikipedia"
+                    url = top.metadata.get("url") or ""
+                    if not fact_exists(subject_name=target, relation_name="RELATED_TO", object_name=title):
+                        upsert_fact_with_source(subject_name=target, relation_name="RELATED_TO", object_name=title, source_url=url)
+                        trace.append({"action": "write_back", "object": title, "url": url, "status": "created"})
+                    else:
+                        trace.append({"action": "write_back", "object": title, "url": url, "status": "exists"})
+                    # Consider success if the top title contains the target name (very simple heuristic)
+                    if target.lower() in title.lower():
+                        success = True
+                        break
+            total += 1
+            total_steps += steps_done
+            total_asks += asks_done
+            total_searches += searches_done
+            rows.append({"task": task, "target": target, "success": bool(success), "steps": steps_done, "asks": asks_done, "searches": searches_done, "trace": trace})
+            if success:
+                successes += 1
+        elif task == "retrieve_award":
+            # Heuristic: search for awards page and write back RELATED_TO; success if title/url hints at awards
+            steps_done = 0
+            searches_done = 0
+            asks_done = 0
+            trace: list[Dict[str, Any]] = []
+            query = f"{target} awards"
+            docs = search_wikipedia(query=query, k=1)
+            top = docs[0] if docs else None
+            searches_done += 1
+            steps_done += 1
+            trace.append({
+                "action": "search",
+                "query": query,
+                "top_title": (top.metadata.get("title") if top else None),
+                "top_url": (top.metadata.get("url") if top else None),
+            })
+            success = False
+            if top is not None and write_back:
+                title = top.metadata.get("title") or "Wikipedia"
+                url = top.metadata.get("url") or ""
+                if not fact_exists(subject_name=target, relation_name="RELATED_TO", object_name=title):
+                    upsert_fact_with_source(subject_name=target, relation_name="RELATED_TO", object_name=title, source_url=url)
+                    trace.append({"action": "write_back", "object": title, "url": url, "status": "created"})
+                else:
+                    trace.append({"action": "write_back", "object": title, "url": url, "status": "exists"})
+                if ("award" in (title or "").lower()) or ("award" in (url or "").lower()):
+                    success = True
+            total += 1
+            total_steps += steps_done
+            total_asks += asks_done
+            total_searches += searches_done
+            rows.append({"task": task, "target": target, "success": bool(success), "steps": steps_done, "asks": asks_done, "searches": searches_done, "trace": trace})
+            if success:
+                successes += 1
+        elif task == "qa_fact":
+            # QA over a known slot: {task:"qa_fact", target:"Spirited Away", slot:"Country", expect_value:"Japan"}
+            slot = str(ep.get("slot") or "")
+            expect_value = str(ep.get("expect_value") or "")
+            steps_done = 0
+            asks_done = 0
+            searches_done = 0
+            trace: list[Dict[str, Any]] = []
+            val = None
+            try:
+                from emg.query import get_slot_value as _get_sv
+                val = _get_sv(target, slot)
+            except Exception:
+                val = None
+            trace.append({"action": "read_graph", "slot": slot, "value": val})
+            success = bool(val and expect_value and str(val).lower() == expect_value.lower())
+            # If not found, attempt a single search (no parsing yet), for provenance/write-back only
+            if not success:
+                query = f"{target} {slot}"
+                docs = search_wikipedia(query=query, k=1)
+                top = docs[0] if docs else None
+                searches_done += 1
+                steps_done += 1
+                trace.append({
+                    "action": "search",
+                    "query": query,
+                    "top_title": (top.metadata.get("title") if top else None),
+                    "top_url": (top.metadata.get("url") if top else None),
+                })
+                if top is not None and write_back:
+                    title = top.metadata.get("title") or "Wikipedia"
+                    url = top.metadata.get("url") or ""
+                    if not fact_exists(subject_name=target, relation_name="RELATED_TO", object_name=title):
+                        upsert_fact_with_source(subject_name=target, relation_name="RELATED_TO", object_name=title, source_url=url)
+                        trace.append({"action": "write_back", "object": title, "url": url, "status": "created"})
+                    else:
+                        trace.append({"action": "write_back", "object": title, "url": url, "status": "exists"})
+            total += 1
+            total_steps += steps_done
+            total_asks += asks_done
+            total_searches += searches_done
+            rows.append({"task": task, "target": target, "slot": slot, "success": bool(success), "steps": steps_done, "asks": asks_done, "searches": searches_done, "trace": trace})
+            if success:
+                successes += 1
+        elif task == "procedure":
+            # Minimal procedure: compute a score from AwardsSignal and Studio
+            # Preconditions: Studio, AwardsSignal present as slots
+            steps_done = 0
+            asks_done = 0
+            searches_done = 0
+            trace: list[Dict[str, Any]] = []
+            needed = ["Studio", "AwardsSignal"]
+            from emg.query import get_slot_value as _get_sv
+            have: Dict[str, str] = {}
+            missing: list[str] = []
+            for s in needed:
+                v = _get_sv(target, s)
+                if v:
+                    have[s] = str(v)
+                else:
+                    missing.append(s)
+            if missing:
+                for s in missing:
+                    trace.append({"action": "ask", "slot": s})
+                    asks_done += 1
+            # Score: AwardsSignal High=3, Medium=2, Low=1; Studio known +1
+            score = 0
+            sig = have.get("AwardsSignal")
+            if sig:
+                score += {"High": 3, "Medium": 2, "Low": 1}.get(sig, 1)
+            if have.get("Studio"):
+                score += 1
+            success = bool(score > 0)
+            steps_done = asks_done  # each ask counted as a step here
+            total += 1
+            total_steps += steps_done
+            total_asks += asks_done
+            total_searches += searches_done
+            rows.append({"task": task, "target": target, "success": bool(success), "steps": steps_done, "asks": asks_done, "searches": searches_done, "score": score, "missing": missing, "trace": trace})
+            if success:
+                successes += 1
+
+    summary = {
+        "episodes": total,
+        "successes": successes,
+        "success_rate": round((successes / total) if total else 0.0, 3),
+        "avg_steps": round((total_steps / total) if total else 0.0, 3),
+        "avg_asks": round((total_asks / total) if total else 0.0, 3),
+        "avg_searches": round((total_searches / total) if total else 0.0, 3),
+    }
+    console.print(summary)
+    # Optional saves
+    if save_json:
+        save_json.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        with save_json.open("w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(_json.dumps(r) + "\n")
+    if save_csv:
+        save_csv.parent.mkdir(parents=True, exist_ok=True)
+        import csv as _csv
+        with save_csv.open("w", encoding="utf-8", newline="") as f:
+            fieldnames = ["task", "target", "slot", "success", "steps", "asks", "searches", "score", "trace"]
+            w = _csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            for r in rows:
+                row = {k: r.get(k, "") for k in fieldnames}
+                # stringify trace for CSV readability
+                if isinstance(row.get("trace"), list):
+                    row["trace"] = _json.dumps(row["trace"])  # type: ignore[index]
+                w.writerow(row)
+
+
+@app.command(name="emg-seed")
+def emg_seed(
+    path: Path = typer.Option(Path("data/emg/seed_entities.jsonl"), "--path", help="Path to EMG seed JSONL"),
+) -> None:
+    """Load EMG seed entities (Entities with Type and SlotValues)."""
+    try:
+        num = load_seed_entities(path)
+    except Exception as exc:
+        console.print({"loaded": 0, "error": str(exc)})
+        raise typer.Exit(code=1)
+    console.print({"loaded": num, "path": str(path)})
 
 if __name__ == "__main__":
     app()

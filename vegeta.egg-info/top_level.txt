@@ -4,6 +4,7 @@ config
 db
 decider
 domain_packs
+emg
 env
 eval
 features

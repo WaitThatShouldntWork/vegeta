@@ -21,6 +21,7 @@ decider/state.py
 decider/triage.py
 domain_packs/cyber/config.yaml
 domain_packs/cyber/questions.yaml
+emg/loader.py
 env/interaction.py
 eval/gen_scenarios.py
 eval/noisy_user.py
