@@ -2,4 +2,4 @@
 
 
 ### Next
-update ontology and seed before coding up.
+Ontology and seed updated; proceed to code decider integrations.

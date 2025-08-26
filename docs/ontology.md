@@ -39,6 +39,23 @@ This is a small, reusable schema used across domains (movies, cyber, etc.). It k
 - SlotSpec scoping: unique `(checklist_name, slot_name)`
 - Use `elementId()` for reporting ids (avoid legacy `id()`).
 
+## Implementation guidance (movies demo)
+- Treat categories like Genre as SlotValues, not entities
+  - Use `(:Entity)-[:HAS_SLOT]->(:SlotValue {slot:"Genre", value})` instead of `(:Genre)` nodes for compact filters.
+  - Keep domain relations only when they connect two entities (e.g., `(:Person)-[:ACTED_IN]->(:Film)`).
+- Property conventions (for retrieval and terms)
+  - `:Entity {id, name, aliases?: string[], summary?}`
+  - Optional embeddings (populated by ingestion): `sem_emb?`, `graph_emb?`.
+  - `[:HAS_SLOT {slot, value, confidence?, source_url?, timestamp?}]`.
+- Minimal registries and indexes
+  - `:Type(name)` unique; `:RelationType(name)` unique.
+  - `:Document(source_url)` unique; lexical scoping unique on `(doc_url, order)` for `:Section/:Paragraph/:Sentence`.
+  - Composite unique on `(:SlotValue(slot, value))`.
+  - Full‑text index on `:Entity(name, aliases)`; optional vector indexes on `sem_emb`, `graph_emb`.
+- Checklists (first‑class)
+  - `:Checklist {name, description}` and `:SlotSpec {name, expect_labels, rel?, required, cardinality}` with scoping unique per checklist.
+  - Use checklists to define required slots (what should exist) rather than pre‑creating placeholders.
+
 ## SlotValues (MetaSlots)
 A `:SlotValue` captures compact, high‑utility attributes we ask about frequently.
 
