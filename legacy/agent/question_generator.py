@@ -74,3 +74,53 @@ def render_from_domain_pack(slot: str, context: Dict[str, str], domain: str = "c
 	return q or render_question_from_slot(slot)
 
 
+
+def llm_generate_search_query(
+	slot: str,
+	*,
+	known: Dict[str, str] | None = None,
+	last_question: str | None = None,
+	context: Dict[str, str] | None = None,
+	use_ollama: bool = False,
+	llm_model: str | None = None,
+) -> str:
+	"""Generate a short search query from known slot-values and the last asked question.
+
+	Avoids leaking ground truth target; aims for disambiguating terms naturally.
+	Falls back to a compact join of known values or the last question if LLM is off/unavailable.
+	"""
+	known = known or {}
+	context = context or {}
+	if not use_ollama:
+		# fallback heuristic: join unique known values
+		vals = [str(v) for _, v in known.items() if v]
+		uniq = []
+		for v in vals:
+			if v not in uniq:
+				uniq.append(v)
+		return (" ".join(uniq) or (last_question or "")).strip() or "wikipedia"
+	parts = []
+	for k, v in known.items():
+		parts.append(f"{k}: {v}")
+	known_str = "; ".join(parts[:6]) or "none"
+	prompt = (
+		"You help form precise web search queries. Given what is known and the question asked, "
+		"produce a very short query (few words) that would likely retrieve the correct page about the movie. "
+		"Do not include private/internal field names. Do not include any unknown ground truth.\n\n"
+		f"Known: {known_str}\n"
+		f"Last question: {last_question or 'n/a'}\n"
+		f"Focus slot: {slot}\n"
+		"Query:"
+	)
+	try:
+		resp = ollama_generate(prompt=prompt, model=(llm_model or context.get("llm_model", "gemma:12b")), temperature=0.2)
+		line = (resp or "").strip().splitlines()[0]
+		return line or "wikipedia"
+	except Exception:
+		vals = [str(v) for _, v in known.items() if v]
+		uniq = []
+		for v in vals:
+			if v not in uniq:
+				uniq.append(v)
+		return (" ".join(uniq) or (last_question or "")).strip() or "wikipedia"
+

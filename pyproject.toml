@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-vegeta = "cli.decide:app"
+vegeta = "vegeta.cli:app"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -42,22 +42,9 @@ disallow_untyped_defs = true
 no_implicit_optional = true
 
 [tool.setuptools]
+package-dir = {"" = "src"}
 packages = [
-  "cli",
-  "decider",
-  "ingest",
-  "retrieval",
-  "schema",
-  "domain_packs",
-  "config",
-  "db",
-  "eval",
-  "features",
-  "policy",
-  "env",
-  "agent",
-  "llm",
-  "emg",
+  "vegeta",
 ]
 
 [tool.setuptools.package-data]

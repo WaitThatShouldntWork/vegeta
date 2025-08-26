@@ -1,6 +1,6 @@
 # Project Brief — VEGETA
 
-VEGETA is a decision engine that picks among Answer / Ask / Search using Expected Information Gain (EIG). First domain: Cybersecurity (CVE triage). See `README.md` for usage; see `TODO.md` for live tasks.
+VEGETA is a Bayesian Active Inference decider that chooses among Answer / Ask / Search using Expected Information Gain (EIG). It uses simple, interpretable likelihood channels over candidate subgraphs (semantic, structure, terms) rather than a heavy neural decoder. Domain‑agnostic; current demo focuses on a generalisable model, starting with movies. See `README.md` for usage; see `TODO.md` for live tasks.
 
 ## Getting Started (succinct)
 
@@ -55,32 +55,43 @@ Ship the simplest UX that makes the policy legible:
 
 Bayesian Brain Model; Cognitive Bayesianism; Predictive Coding; Predictive Processing; Free Energy Principle; Variational Free Energy; ELBO; Expected Information Gain; Active Inference; KL Divergence; Hierarchical Generative Models.
 
-## From a semantic graph to $v$ and $u'$
+## From retrieval to $v$ and predicted $u'$ (current design)
 
-You have a world graph (entities, relations, attributes) and a procedure/policy layer. You want:
+We use a simple, interpretable pipeline over a working‑set subgraph:
 
-**$v$: latent causes.** In practice, a compact state capturing which entity/procedure branch is true, plus continuous parameters. Build $v$ with a graph encoder $q_\phi(v|G,D)$: e.g., a GNN over the working-set subgraph plus current evidence $D$ (user slots, retrieved facts). This outputs a posterior over hypotheses and any continuous latents you need.
+- Latents $v$ (factorized): $z_{checklist}$, $z_{goal}$, $z_{subgraph}$, $\{z_{slot_r}\}$, $z_{novelty}$.
+- Selective activation (anchors → candidates):
+  - Embed the utterance; retrieve k‑NN anchors by semantic and graph embeddings; combine and take top‑K.
+  - Expand each anchor into small candidate subgraphs (fixed hops or PPR) and keep top‑M.
+  - Define retrieval context $R$ = anchors, candidates, parameters, provenance.
+- Predicted channels $u'$ for a candidate $S_j$:
+  - $u'_\text{sem}(S_j)$: pooled node embeddings concatenated with a small structure vector; then normalize.
+  - $u'_\text{struct}(S_j)$: expected slot/edge counts from the active checklist (what should exist).
+  - $u'_\text{terms}(S_j)$: expected key terms from node names/aliases, relation words, and checklist lexicon (optionally LLM‑augmented).
+- Observation channels $u$:
+  - $u_\text{sem}$: utterance embedding; $u_\text{terms}$: extracted keywords/entities; $u_\text{struct\_obs}(S_j)$: measured counts within $S_j$.
+- Likelihood distances per channel:
+  - $\delta_{sem} = 1 - \text{cosine}(u_{sem}, u'_{sem})$
+  - $\delta_{struct} = \|u_{struct\_obs}(S_j) - u'_{struct}(S_j)\|$ with penalties for required‑missing
+  - $\delta_{terms} = 1 - \text{JaccardOverlap}$ (or cosine over term‑embeddings)
+- Combined log‑likelihood used everywhere (single source of truth):
 
-**$u'$: predicted observation.** Use a generative decoder $p_\theta(u|v)$ that maps the latent state to an expected observation under a candidate action:
+  $\log p(u\mid v=S_j) = -\left[\alpha\,\frac{\delta_{sem}}{\sigma_{sem}^2} + \beta\,\frac{\delta_{struct}}{\sigma_{struct}^2} + \gamma\,\frac{\delta_{terms}}{\sigma_{terms}^2} + \text{penalties}\right] + C$
 
-- **Ask actions**: predicted answer distribution to a question (yes/no or categorical) derived from graph structure and priors
-- **Search actions**: predicted features of a retrieval result (which facts should appear, presence of a policy flag)  
-- **Answer actions**: predicted task outcome quality/risk
-
-Prediction error is $\epsilon = u - u'$. Training pushes the encoder to produce latents that make the decoder's predictions accurate while keeping $q_\phi(v)$ simple relative to the prior $p(v)$. This is a VAE on graphs:
-
-- **Recognition model (encoder)**: GNN over nodes/edges in the working set, outputs $q_\phi(v)$
-- **Generative model (decoder)**: predicts observable answers or document features given $v$ and the chosen action template
-
-**Hierarchy**: build 3–6 stacked encoder/decoder layers tied to graph abstractions (ontology level, procedure step, policy flags). Higher layers predict coarser things; lower layers predict concrete answers and snippets. Errors flow upward; adjustments flow downward.
+- Priors:
+  - $p(z_{checklist})$ from history and frequencies; $p(z_{goal}\mid z_{checklist})$ via a small compatibility table.
+  - $p(z_{subgraph}\mid R)$ from retrieval softmax, simplicity, provenance, recency.
+  - $p(z_{slot_r})$ from local popularity/type constraints with an "unknown" option.
+  - $p(z_{novelty})$ from OOD signals (low similarity, distance from clusters, poor checklist fit).
+- Useful defaults: K anchors ≈ 10; M candidates ≈ 20; hops=2 (or PPR top‑N); $\alpha=1.0,\ \beta=0.5,\ \gamma=0.3$; $\sigma^2_{sem}=0.3,\ \sigma^2_{struct}=0.2,\ \sigma^2_{terms}=0.2$; temperature $\tau\in[0.5,1.0]$.
 
 ## Variational algorithm, approximate Bayesian inference
 
-Exact Bayes is unmanageable. We approximate with $q_\phi(v)$ and minimize free energy:
+Exact Bayes is unmanageable. We approximate with factorized $q(v)$ and minimize free energy:
 
-$$F = \underbrace{KL[q_\phi(v) \| p(v)]}_{\text{complexity}} - \underbrace{E_{q_\phi}[\log p_\theta(u|v)]}_{\text{accuracy}}$$
+$$F = KL[q(v) \| p(v)] - E_{q}[\log p(u|v)]$$
 
-The KL term keeps beliefs from drifting into fantasy; the accuracy term forces your generator to actually explain observations. Training objective equals maximizing the ELBO. Inference at runtime uses the encoder to produce $q_\phi(v)$; action selection uses EIG computed from the predicted observation distributions.
+In practice, we reweight candidates by $p(u\mid v)\,p(v)$ and normalize (softmax with temperature $\tau$) to obtain $q(v)$; no heavy encoder/decoder is required.
 
 ## KL divergence, Shannon angle
 
@@ -108,13 +119,18 @@ Action is another knob to drive down expected future free energy. Your policy ch
 
 Rather than asking generic high‑EIG slots, prefer questions that unblock the current Procedure Step. Model Steps with preconditions (`:Step-[:REQUIRES]->(:SlotValue or Condition)`), and at runtime ask only for missing preconditions. Public preconditions (e.g., “patch available?”) route to Search; private ones (e.g., “internet exposed?”) route to Ask. This focuses interaction on “what unlocks progress next,” reduces question count, and yields logs that can be distilled into a fast‑and‑frugal policy tree.
 
-## Practical recipe to implement
+## Practical recipe (current)
 
-- **Working set**: build a bounded subgraph around the task seeds and whitelisted predicates
-- **Encoder**: GNN over the working set plus observed slots; output discrete posteriors over hypotheses and continuous latents
-- **Decoder library**: action templates mapping a latent to expected observation distributions (answer categories, doc features)
-- **EIG estimator**: for each candidate action, sample plausible outcomes, update the posterior with the decoder's likelihoods, compute expected entropy drop; subtract cost
-- **Training**: self-supervise with reconstruction tasks (property prediction, link prediction, question-answer prediction) and add a KL term to a simple prior over $v$
+- Build working set via selective activation: utterance → anchors → candidate subgraphs; record retrieval context and provenance.
+- Compute per‑candidate features and predicted channels $u'$; measure observed $u_{struct\_obs}$.
+- Form priors over $z_{checklist}$, $z_{goal}$, $z_{subgraph}$, $\{z_{slot_r}\}$, $z_{novelty}$.
+- Compute $\log p(u\mid v)$ via the channel distances; obtain $q(v) \propto p(u\mid v)\,p(v)$.
+- Estimate EIG:
+  - Ask: simulate a few likely slot answers; average entropy drop.
+  - Search: assume retrieval confirms/denies top hypotheses per calibrated rates; estimate entropy drop.
+  - Answer: current confidence minus risk.
+- Choose action by Utility = expected_gain − cost − risk; enforce sensible thresholds (confidence, entropy, margin).
+- Persist session state: truncated $q(z_{subgraph})$, slot posteriors, novelty flag, retrieval trace, and a short conversation summary.
 
 ## Simulated user (explained simply)
 
@@ -124,11 +140,9 @@ Rather than asking generic high‑EIG slots, prefer questions that unblock the c
 
 ## Where do questions come from?
 
-- From `domain_packs/<domain>/questions.yaml`. Each entry defines:
-  - `id` and `text` shown to the user
-  - `slot` it resolves (e.g., `internet_exposed`)
-  - optional prior and likelihoods for Bayesian updates
-- The question-selection agent computes which slot would cut uncertainty the most (highest EIG) and picks that next.
+- From required slots in the active checklist and the highest‑entropy unknowns in $\{z_{slot_r}\}$.
+- Render concise, targeted questions dynamically; optionally template per slot and let an LLM phrase the text.
+- The question selector approximates EIG and chooses the slot that most reduces uncertainty given cost.
 
 ## Is our dataset big enough for a contextual bandit?
 

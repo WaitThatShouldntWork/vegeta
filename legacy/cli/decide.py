@@ -36,7 +36,7 @@ from db.writeback import upsert_fact_with_source, fact_exists, has_slot_value
 from agent.question_generator import render_question_from_slot, render_from_domain_pack
 from agent.question_selector import pick_next_slot_by_eig
 from emg.loader import load_seed_entities
-from emg.query import find_films_by_slots
+from emg.query import find_films_by_slots, get_entity_types, list_slots_for_type, list_common_slots
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -660,27 +660,59 @@ def loop_emg(
             asks_done = 0
             searches_done = 0
             trace: list[Dict[str, Any]] = []
-            # Try graph filter for known slots; if only one candidate remains, count success early
+            # Try graph filter for known slots; if only one candidate remains, verify via retrieval
             candidates = find_films_by_slots(known)
             if len(candidates) == 1 and candidates[0].lower() == target.lower():
+                from agent.question_generator import llm_generate_search_query as _llm_sq
+                ver_q = _llm_sq(
+                    slot="title",
+                    known=known,
+                    last_question="Guess what film I'm thinking.",
+                    context={"llm_model": "gemma:4b"},
+                    use_ollama=ollama,
+                    llm_model="gemma:4b",
+                )
+                docs = search_wikipedia(query=ver_q, k=1)
+                top = docs[0] if docs else None
+                verified = bool(top and target.lower() in (top.metadata.get("title") or "").lower())
+                steps_done = 1
+                asks_done = 0
+                searches_done = 1
+                trace = [
+                    {"action": "early_success", "reason": "unique_graph_match", "candidates": candidates},
+                    {
+                        "action": "verification_search",
+                        "query": ver_q,
+                        "top_title": (top.metadata.get("title") if top else None),
+                        "top_url": (top.metadata.get("url") if top else None),
+                    },
+                ]
                 total += 1
-                total_steps += 0
-                total_asks += 0
-                total_searches += 0
-                successes += 1
+                total_steps += steps_done
+                total_asks += asks_done
+                total_searches += searches_done
                 rows.append({
                     "task": task,
                     "target": target,
-                    "success": True,
-                    "steps": 0,
-                    "asks": 0,
-                    "searches": 0,
-                    "trace": [{"action": "early_success", "reason": "unique_graph_match", "candidates": candidates}],
+                    "success": bool(verified),
+                    "steps": steps_done,
+                    "asks": asks_done,
+                    "searches": searches_done,
+                    "trace": trace,
                 })
+                if verified:
+                    successes += 1
                 continue
-            # Simple unknown-first slot order
-            candidate_slots = ("GenreCluster", "Era", "Country", "Studio")
-            unknowns = [s for s in candidate_slots if s not in known]
+            # Derive candidate slots dynamically from graph schema
+            type_names = get_entity_types(target)
+            derived: list[str] = []
+            for t in type_names or ["Film"]:
+                for s in list_slots_for_type(t):
+                    if s not in derived:
+                        derived.append(s)
+            if not derived:
+                derived = list_common_slots(limit=8)
+            unknowns = [s for s in derived if s not in known]
             # Step loop
             success = False
             for _ in range(max(1, steps)):
@@ -697,8 +729,19 @@ def loop_emg(
                     except Exception:
                         qtext = f"Provide the film's {slot}."
                     trace.append({"action": "ask", "slot": slot, "question": qtext})
-                # Always search Wikipedia for the target (acts as our public fact check)
-                query = target
+                    # Auto-respond from graph when possible to simulate a user reply
+                    try:
+                        from emg.query import get_slot_value as _get_sv
+                        ans = _get_sv(target, slot)
+                    except Exception:
+                        ans = None
+                    if ans is not None:
+                        known[slot] = str(ans)
+                        trace.append({"action": "answer", "slot": slot, "value": known[slot], "source": "graph"})
+                # Always search Wikipedia using an LLM-generated query from the last asked question and known slots
+                from agent.question_generator import llm_generate_search_query as _llm_sq
+                last_q = trace[-1]["question"] if trace and trace[-1].get("action") == "ask" else "Guess what film I'm thinking."
+                query = _llm_sq(slot=slot, known=known, last_question=last_q, context={"llm_model": "gemma:4b"}, use_ollama=ollama, llm_model="gemma:4b")
                 docs = search_wikipedia(query=query, k=1)
                 top = docs[0] if docs else None
                 searches_done += 1
@@ -887,6 +930,103 @@ def emg_seed(
         console.print({"loaded": 0, "error": str(exc)})
         raise typer.Exit(code=1)
     console.print({"loaded": num, "path": str(path)})
+
+
+@app.command(name="emg-interactive")
+def emg_interactive(
+    steps: int = typer.Option(10, "--steps", help="Max turns"),
+    ollama: bool = typer.Option(False, "--ollama/--no-ollama", help="Use local LLM (Ollama) for question/query gen"),
+    llm_model: str = typer.Option("gemma:4b", "--llm-model", help="Model tag when using Ollama"),
+    show_candidates: bool = typer.Option(True, "--show-candidates/--hide-candidates", help="Show candidate films each turn"),
+    k: int = typer.Option(1, "--k", help="Docs to preview on retrieval"),
+) -> None:
+    """Interactive loop for identifying a film via human Q&A.
+
+    Flow:
+    - You type your own initial question.
+    - Assistant picks a slot, generates a natural question, and proposes a short search query.
+    - You answer; we update known slot-values and show evolving candidates.
+    - Stops when unique candidate remains or steps exhausted.
+    Commands during answer: /skip, /done, /guess
+    """
+    from agent.question_generator import llm_generate_question as _llm_q
+    from agent.question_generator import llm_generate_search_query as _llm_sq
+
+    console.rule("Interactive: Guess the film")
+    user_q = input("You: ").strip()
+    if not user_q:
+        user_q = "Guess what film I'm thinking."
+    console.print({"user_question": user_q})
+
+    # Known slot-values accumulate from your answers
+    known: Dict[str, str] = {}
+    trace: list[Dict[str, Any]] = []
+    chosen_slots: list[str] = []
+
+    # Candidate slot schema derived from graph for Type 'Film'
+    derived_slots = list_slots_for_type("Film") or list_common_slots(limit=8)
+
+    for turn in range(1, max(1, steps) + 1):
+        # Compute candidates given what we know so far
+        candidates = find_films_by_slots(known)
+        if show_candidates:
+            console.print({"turn": turn, "candidates": candidates[:5], "candidates_total": len(candidates)})
+        if len(candidates) == 1:
+            console.rule("Guess")
+            console.print({"film": candidates[0], "reason": "unique match from provided answers"})
+            break
+
+        # Pick next slot: prefer most common slots first, excluding answered
+        next_slot = next((s for s in derived_slots if s not in known and s not in chosen_slots), None)
+        if next_slot is None:
+            # Nothing left to ask; stop
+            console.print({"done": True, "reason": "no more informative slots"})
+            break
+        chosen_slots.append(next_slot)
+
+        # Generate a natural question
+        qctx = {"llm_model": llm_model, "task": "identify_film", "known_keys": list(known.keys())}
+        try:
+            qtext = _llm_q(next_slot, context=qctx, use_ollama=ollama)
+        except Exception:
+            qtext = f"Could you share more about the {next_slot}?"
+        console.rule(f"Step {turn}")
+        console.print({"slot": next_slot, "question": qtext})
+        trace.append({"action": "ask", "slot": next_slot, "question": qtext})
+
+        # Get your answer or a command
+        ans = input("Your answer (/skip, /done, /guess): ").strip()
+        if ans.lower() == "/done":
+            console.print({"stopped": True, "reason": "user"})
+            break
+        if ans.lower() == "/guess":
+            console.rule("Current Guess Candidates")
+            console.print(candidates[:10])
+            # Continue loop without consuming a turn
+            chosen_slots.pop()
+            continue
+        if ans.lower() != "/skip" and ans:
+            known[next_slot] = ans
+            trace.append({"action": "answer", "slot": next_slot, "value": ans, "source": "user"})
+
+        # Generate a short retrieval query from the latest question + known
+        try:
+            query = _llm_sq(slot=next_slot, known=known, last_question=qtext, context={"llm_model": llm_model}, use_ollama=ollama, llm_model=llm_model)
+        except Exception:
+            # Heuristic join of known values
+            query = " ".join({v for v in known.values() if v}) or qtext
+        docs = search_wikipedia(query=query, k=max(1, k))
+        top = docs[0] if docs else None
+        trace.append({
+            "action": "search",
+            "query": query,
+            "top_title": (top.metadata.get("title") if top else None),
+            "top_url": (top.metadata.get("url") if top else None),
+        })
+        console.print({"query": query, "top": (top.metadata if top else None)})
+
+    console.rule("Session Summary")
+    console.print({"known": known, "turns": len(trace), "trace": trace})
 
 if __name__ == "__main__":
     app()

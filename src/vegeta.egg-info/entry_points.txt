@@ -1,0 +1,2 @@
+[console_scripts]
+vegeta = vegeta.cli:app

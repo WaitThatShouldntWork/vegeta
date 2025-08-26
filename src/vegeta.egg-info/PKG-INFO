@@ -1,0 +1,156 @@
+Metadata-Version: 2.4
+Name: vegeta
+Version: 0.1.0
+Summary: Value Estimation Gain Evaluation Tool & Analysis (VEGETA)
+Author: VEGETA Team
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: typer>=0.12.5
+Requires-Dist: rich>=13.7.1
+Requires-Dist: pyyaml>=6.0.1
+Provides-Extra: dev
+Requires-Dist: ruff>=0.4.10; extra == "dev"
+Requires-Dist: mypy>=1.10.0; extra == "dev"
+Requires-Dist: pytest>=8.2.0; extra == "dev"
+Requires-Dist: typer[all]>=0.12.5; extra == "dev"
+
+# VEGETA — Value Estimation Gain Evaluation Tool & Analysis
+
+VEGETA is a decision engine. At each step it either Answer, Ask, or Search — whichever is expected to cut uncertainty the most for the least cost. 
+
+## Quick start (Windows, PowerShell)
+- Setup and activate
+  - `scripts/setup.ps1 -Dev`
+  - `.venv\Scripts\Activate.ps1`
+- Try the decision demo (one-shot)
+  - Basic: `vegeta decide --cve CVE-2025-TEST`
+  - Force Search and show preview: `vegeta decide --cve CVE-2025-TEST --force-action search --retrieve`
+- Build a tiny cyber snapshot (optional write to Aura)
+  - `vegeta ingest-cyber --mini`
+  - Upsert to Aura (if configured): `scripts/ingest_cyber.ps1 -Upsert`
+  - From feeds (NVD with KEV/EPSS; optional ATT&CK): `vegeta ingest-cyber --fetch-nvd --limit 50 --include-attack --upsert --snapshot-label vYYYY_MM_DD`
+- Get a triage suggestion (manual inputs)
+  - `vegeta triage --cvss 8.1 --epss 0.5 --kev --asset-present --internet-exposed`
+- Tests and tiny eval
+  - `scripts/test.ps1`
+  - `vegeta eval --scenarios eval/scenarios_cyber.jsonl`
+  - `vegeta eval-ask --scenarios eval/scenarios_cyber.jsonl`
+  - Active loop (end-to-end): `vegeta loop --cve CVE-2025-TEST --steps 3 --write-back`
+    - What it does: picks a question → searches Wikipedia → writes a small fact back into Neo4j with the source.
+    - No CVE? It will use the question text as the search query and write a fact with subject “Unknown”.
+
+### Example: Active loop (plain English)
+
+Command:
+```powershell
+vegeta loop --cve CVE-2025-TEST --steps 3 --write-back
+```
+
+What happened in step 1 (sample):
+- slot: `internet_exposed` — the thing we’re unsure about and want to ask/search for
+- question: "Is the affected asset asset exposed to the public internet?" — the question we’d ask (it says “asset” because no asset name was given)
+- query: `CVE-2025-TEST` — what we searched Wikipedia for
+- top: Wikipedia page we found (title + url)
+- write_back: we tried to save a small fact in Neo4j linking the subject to that page
+  - `skipped: true, reason: exists` means the fact was already in the graph, so we didn’t add a duplicate
+- write_back_lex: we also made sure the Document and a Sentence node exist and are linked (lexical breadcrumb)
+
+Tip: want a nicer question? Provide an assets JSON so we can fill `{asset_name}`:
+```powershell
+vegeta loop --cve CVE-2025-TEST --steps 1 --write-back --assets .\assets.json
+```
+Where `assets.json` can be:
+```json
+{"assets": [{"id": 1, "name": "edge-fw-01"}]}
+```
+Then the question becomes: "Is the affected asset edge-fw-01 exposed to the public internet?"
+- Neo4j helpers
+  - Bootstrap constraints: `vegeta bootstrap`
+  - Working set summary: `vegeta ws --cve CVE-2025-TEST`
+
+## How it works (plain English)
+- Keep a small belief about what’s true right now (and how unsure we are).
+- For each choice — Answer, Ask, or Search — estimate how much it would reduce uncertainty (Expected Information Gain), minus a small cost for time/tokens/bugging the user.
+- Pick the best action. If we’re already confident enough, just answer.
+- Loop: observe → update belief → choose again.
+
+### Simulated user (for training and eval)
+- For Ask, we use a tiny "noisy user" that returns yes/no based on scenario ground-truth with a small error rate. This lets us test/train information-seeking without a human.
+- Questions are defined per domain in `domain_packs/<domain>/questions.yaml` and chosen by estimated EIG.
+
+### What it does today (reality check)
+- Belief: represented as a single `belief_entropy` number and a few derived slots. It’s computed from CVE signals (CVSS/EPSS/KEV) if available; otherwise defaults high (uncertain). No persistent session state yet.
+- Scoring: simple heuristics
+  - Answer: confidence from CVSS/EPSS/KEV; small cost if confidence is low.
+  - Ask: estimated entropy drop based on how many outcomes a question could have; flat cost.
+  - Search: fixed gain with a small boost if KEV is true; flat cost.
+- Choice: pick the highest net score, unless confidence passes a threshold (then Answer). If entropy is high and no assets are known, prefer Ask.
+- Update loop: not implemented in `vegeta decide` yet. It returns one decision per run. To simulate multiple steps, rerun with new info or use `vegeta eval-ask` / `vegeta ask-then-triage` for a simple two-ask flow.
+
+#### Key terms (quick glossary)
+- Derived slot: a yes/no flag we compute from signals to make decisions simpler.
+  - `actively_exploited` ← from `kev_flag`
+  - `epss_high` ← `epss > 0.5`
+  - `severity_high` ← `cvss >= 7.0`
+- CVE signals: the three inputs we try to read from Neo4j for a CVE (if configured):
+  - `cvss` (0–10), `epss` (0–1), `kev_flag` (true/false)
+  - Where: `decider/graph_signals.py` via `get_cve_graph_signals`
+- Belief vs confidence (not the same):
+  - Belief (entropy): how uncertain we are overall (lower is more sure)
+  - Confidence: how ready we are to answer now (higher is more sure)
+
+#### How we compute the numbers (EIG with Shannon entropy)
+- Belief entropy (display + ask scoring input):
+  - Risk = `0.5*cvss_norm + 0.4*epss + 0.1*kev_flag` where `cvss_norm = cvss/10`.
+  - Entropy = `1.0 - min(1.0, risk)`, then clamped to [0.1, 1.0].
+- Confidence (answer scoring + answer shortcut):
+  - Base = same weighted mix as above; then boosts:
+    - +0.2 if `actively_exploited`, +0.1 if `epss_high`, +0.1 if `severity_high` (capped at 1.0)
+  - If `confidence >= 0.75`, we shortcut to Answer.
+- Ask information gain:
+  - We use Shannon entropy H(v) over a small latent state v (risk class + flags).
+  - EIG(Ask, s) ≈ H(v) − E[H(v | answer to slot s)] − cost.
+  - Current PoC uses a rough estimator; the next step is a small decoder table p(answer|v) to update p(v) properly.
+  - See: `estimate_entropy_drop_for_ask` in `decider/eig.py`.
+- Search information gain (rough):
+  - Base EIG = 0.2 (+0.05 if `kev_flag` true), cost = 0.15.
+  - See: `score_search` in `decider/eig.py`.
+
+Code paths: `decider/choose.py` wires the signals, confidence, EIG estimates, and final choice.
+
+## What’s in the repo
+- CLI: `decide`, `ingest-cyber`, `graph-counts`, `triage`, `eval`
+- Cyber domain pack: 12–15 questions, NVD/CPE mappers, mini ETL snapshot
+- Schema tools: metamodel + linter; bootstrap Cypher
+- Retrieval: local snapshot stub with preview
+- Tests across modules
+
+## Neo4j config (optional)
+Use `.env` or environment variables:
+- `AURA_URI` or `NEO4J_URI`
+- `AURA_USER` or `NEO4J_USER|NEO4J_USERNAME`
+- `AURA_PASSWORD` or `NEO4J_PASSWORD`
+
+## Read more
+- `docs/overview.md` — short overview of the pieces
+- `docs/architecture.md` — diagram of how parts connect
+  - Includes EMG (Editable Memory Graph) and active loop notes
+- `docs/ontology.md` — the EMG schema (Entities, SlotValues, Facts, Documents) and how EIG drives Ask vs Search
+- `docs/process_flow.md` — detailed end-to-end Mermaid diagram of how the system loops
+- `docs/policy.md` — cost knobs and thresholds
+- `docs/project_brief.md` — longer notes
+- `docs/architecture.md` now includes a short "Learning loop (simulator + policy)"
+- `TODO.md` — live task list
+
+## Glossary
+- Where CVSS/EPSS/KEV come from and how they’re decided
+  - CVSS (0–10): an industry-standard severity score published with each CVE by NVD or vendors. It’s based on impact and exploitability metrics.
+  - EPSS (0–1): a community model (FIRST.org) that predicts the probability a CVE will be exploited in the wild in the near term.
+  - KEV flag (true/false): CISA’s Known Exploited Vulnerabilities list. If a CVE is on KEV, we set `kev_flag=true`.
+  - In this repo, these are just properties on `:CVE` nodes. We fetch them during ingest and read them at decision time. Our current weights/thresholds are simple defaults and can be tuned in code later or moved to config.
+
+- NVD: National Vulnerability Database (public list of CVEs)
+- CVE: Common Vulnerabilities and Exposures (the vulnerability ID, e.g., CVE-2025-1234)
+- CPE: Common Platform Enumeration (standard product name used to link CVEs)
+- KEV: CISA Known Exploited Vulnerabilities (flag that a CVE is exploited in the wild)
+- EPSS: Exploit Prediction Scoring System (probability a CVE will be exploited)
