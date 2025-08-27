@@ -1,9 +1,0 @@
-typer>=0.12.5
-rich>=13.7.1
-pyyaml>=6.0.1
-
-[dev]
-ruff>=0.4.10
-mypy>=1.10.0
-pytest>=8.2.0
-typer[all]>=0.12.5

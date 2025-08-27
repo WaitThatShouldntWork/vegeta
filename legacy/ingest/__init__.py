@@ -1,3 +1,0 @@
-"""Ingestion pipeline package placeholder."""
-
-

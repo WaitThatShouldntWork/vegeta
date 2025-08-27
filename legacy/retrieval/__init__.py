@@ -1,3 +1,0 @@
-"""Retrieval subsystem package placeholder."""
-
-
