@@ -1,0 +1,14 @@
+# Core dependencies
+numpy>=1.21.0
+pandas>=1.3.0
+requests>=2.25.0
+neo4j>=5.0.0
+pyyaml>=6.0.0
+
+# Optional dependencies for interfaces
+colorama>=0.4.0  # For colored CLI output
+streamlit>=1.20.0  # For web interface (optional)
+
+# Development dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0

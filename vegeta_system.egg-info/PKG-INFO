@@ -1,0 +1,270 @@
+Metadata-Version: 2.4
+Name: vegeta-system
+Version: 0.1.0
+Summary: Bayesian Active Inference System
+Author: VEGETA Project
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.21.0
+Requires-Dist: pandas>=1.3.0
+Requires-Dist: requests>=2.25.0
+Requires-Dist: neo4j>=5.0.0
+Requires-Dist: pyyaml>=6.0.0
+Requires-Dist: colorama>=0.4.0
+Requires-Dist: streamlit>=1.20.0
+Requires-Dist: pytest>=7.0.0
+Requires-Dist: pytest-cov>=4.0.0
+Dynamic: author
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# VEGETA - Bayesian Active Inference System
+
+A sophisticated system for active inference using Bayesian decision theory, designed for 20-questions style interactions and graph-based knowledge retrieval.
+
+## Features
+
+- **🧠 Bayesian Active Inference**: Uses Expected Information Gain (EIG) to decide between asking questions, searching for facts, or providing answers
+- **🔗 Graph-Based Knowledge**: Leverages Neo4j knowledge graphs with semantic embeddings
+- **🔄 Multi-Turn Conversations**: Maintains conversation state and belief carryover across turns
+- **🎯 Smart Question Generation**: Uses LLMs to generate natural clarifying questions
+- **📊 Uncertainty Quantification**: Tracks confidence and reasoning for transparent decision-making
+- **🎮 20-Questions Gameplay**: Perfect for guessing games and interactive discovery
+
+## Quick Start
+
+### Prerequisites
+
+1. **Neo4j Database**: Running locally on bolt://localhost:7687
+2. **Ollama**: Running locally on http://localhost:11434 with these models:
+   - `gemma:4b` (for question generation)
+   - `nomic-embed-text` (for embeddings)
+
+### Installation
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd VEGETA
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install in development mode
+pip install -e .
+
+# Set up the database (load seed data)
+python load_seed.py
+```
+
+### Usage
+
+#### Interactive CLI Mode (20-Questions Style)
+
+```bash
+# Start interactive session
+vegeta interactive
+```
+
+Example interaction:
+```
+You: I'm thinking of a Pierce Brosnan spy film from the 1990s
+VEGETA [ASK]: Which specific film are you thinking of - GoldenEye or another Bond film from that era?
+Confidence: 45%
+
+You: It has a tank chase scene
+VEGETA [ANSWER]: Based on your clues, you're thinking of GoldenEye (1995)!
+Confidence: 87%
+```
+
+#### Single Query Mode
+
+```bash
+# Process one query
+vegeta query "I want action movies similar to Heat"
+```
+
+#### Python API
+
+```python
+from vegeta import VegetaSystem, Config
+
+# Initialize system
+config = Config()
+system = VegetaSystem(config)
+
+# Start session and process queries
+session_id = system.start_session()
+response = system.process_query(session_id, "I'm thinking of a sci-fi film from 1999")
+
+print(f"Action: {response.action}")
+print(f"Content: {response.content}")
+print(f"Confidence: {response.confidence:.1%}")
+```
+
+## Architecture
+
+### Core Components
+
+```
+src/
+├── core/               # System orchestration and configuration
+├── extraction/         # Entity extraction and semantic analysis
+├── retrieval/          # Graph-based candidate retrieval
+├── inference/          # Bayesian prior/posterior updates
+├── session/            # Multi-turn conversation management
+├── generation/         # Natural language question/answer generation
+├── interfaces/         # CLI and web interfaces
+└── utils/              # Database and LLM utilities
+```
+
+### Key Algorithms
+
+1. **Entity Extraction**: LLM-based extraction of canonical terms and entities
+2. **Semantic Retrieval**: Embedding-based anchor selection and subgraph expansion
+3. **Bayesian Inference**: Prior construction and posterior updates using observed evidence
+4. **Decision Making**: Expected Information Gain calculation for ASK vs SEARCH vs ANSWER
+5. **Question Generation**: LLM-powered natural language question formulation
+
+## Configuration
+
+Configuration is managed through YAML files in the `config/` directory:
+
+```yaml
+database:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  password: "password"
+
+ollama:
+  base_url: "http://localhost:11434"
+  default_model: "gemma:4b"
+  embedding_model: "nomic-embed-text"
+
+system:
+  defaults:
+    k_anchors: 10
+    tau_retrieval: 0.7
+    alpha: 1.0    # Semantic weight
+    beta: 0.5     # Structural weight
+    gamma: 0.3    # Terms weight
+```
+
+## Multi-Turn Sessions
+
+VEGETA maintains conversation state across turns:
+
+- **Belief Carryover**: Posteriors from previous turns inform current priors
+- **Conversation History**: Tracks questions asked and answers received
+- **Adaptive Learning**: Adjusts strategy based on user responses
+- **Session Management**: Handles timeouts and session persistence
+
+## Knowledge Graph Schema
+
+The system uses a flexible ontology (see `docs/ontology.md`):
+
+- **Entities**: Films, People, Awards, etc.
+- **SlotValues**: Compact attributes (Genre, Era, Country)
+- **Facts**: Reified claims with provenance
+- **Checklists**: Procedural templates for different tasks
+
+## Development
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=vegeta
+```
+
+### Adding New Domains
+
+1. Extend the ontology in `docs/ontology.md`
+2. Add domain-specific entities to seed data
+3. Create domain checklists for task types
+4. Update extraction patterns if needed
+
+## Examples
+
+### Movie Identification
+```
+User: "I'm thinking of a film. Try to guess it."
+VEGETA: "Could you tell me what genre this film is?"
+User: "It's a sci-fi action movie"
+VEGETA: "Do you remember approximately when it was released?"
+User: "Late 1990s"
+VEGETA: "Are there any specific actors you remember?"
+User: "Keanu Reeves"
+VEGETA: "Based on your clues, you're thinking of The Matrix (1999)!"
+```
+
+### Movie Recommendation
+```
+User: "I want action movies similar to Heat"
+VEGETA: "What specifically did you like about Heat - the heist elements, the cat-and-mouse dynamic, or the realistic action?"
+User: "The realistic action and complex characters"
+VEGETA: "Based on those preferences, I'd recommend Ronin (1998) - it has similar realistic action sequences and complex character dynamics."
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Neo4j Connection Failed**: Ensure Neo4j is running and credentials are correct
+2. **Ollama Models Missing**: Run `ollama pull gemma:4b` and `ollama pull nomic-embed-text`
+3. **Low Confidence Responses**: Check if embeddings were generated during database setup
+4. **Import Errors**: Ensure you've installed in development mode with `pip install -e .`
+
+### Logging
+
+Set log level in config or environment:
+```bash
+export PYTHONPATH=src
+python -c "
+import logging
+logging.basicConfig(level=logging.DEBUG)
+from vegeta import VegetaSystem, Config
+system = VegetaSystem(Config())
+"
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Ensure all tests pass
+5. Submit a pull request
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Citation
+
+If you use VEGETA in your research, please cite:
+
+```bibtex
+@misc{vegeta2024,
+  title={VEGETA: Bayesian Active Inference for Interactive Knowledge Discovery},
+  author={VEGETA Project},
+  year={2024},
+  url={https://github.com/your-org/vegeta}
+}
+```

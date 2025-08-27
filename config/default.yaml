@@ -1,0 +1,43 @@
+database:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  password: "password"
+  database: "neo4j"
+
+ollama:
+  base_url: "http://localhost:11434"
+  # default_model: "Gemma3:12b"
+  default_model: "qwen3:8b"
+  # default_model: deepseek-r1:8b
+
+  embedding_model: "nomic-embed-text:latest"
+
+system:
+  defaults:
+    k_anchors: 10
+    M_candidates: 20
+    hops: 2
+    tau_retrieval: 0.7
+    tau_posterior: 0.7
+    alpha: 1.0
+    beta: 0.5
+    gamma: 0.3
+    sigma_sem_sq: 0.3
+    sigma_struct_sq: 0.2
+    sigma_terms_sq: 0.2
+    N_terms_max: 15
+    N_expected: 20
+    small_set_threshold: 3
+    small_set_blend: 0.5
+    lambda_missing: 0.30
+    d_cap: 40
+    lambda_hub: 0.02
+
+session:
+  timeout: 3600  # 1 hour
+  max_turns: 20
+  inertia_rho: 0.7
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

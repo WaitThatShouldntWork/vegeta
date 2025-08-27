@@ -45,7 +45,8 @@ NEO4J_DATABASE = "neo4j"
 
 # Ollama Configuration
 OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "Gemma3:12b"
+# DEFAULT_MODEL = "Gemma3:12b"
+DEFAULT_MODEL = "qwen3:8b"
 
 # System Parameters
 DEFAULTS = {
