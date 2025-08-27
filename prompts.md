@@ -1,15 +1,17 @@
 @attempt1.py
 @ontology.md
-
+What do you think of this output?
 when you propose solution ask yourself: how does the human brain currently handle this? and then: how can we as closely as possible replicate that process?
 2) is this generalisable and repeatable across multiple domains and topics?
 3) is the code general? does it contain hard logic? does it follow human brain aspirations of generalisability? 
 
 Provide current code bits and the problems with them.
 
-Propose a clear solution and its benefits to the overall system
+Propose a clear solution and its benefits to the overall system.
 
-What do you think of this output?
+Discuss with me and ask clarification questions if needed. dont proceed to code without approval. 
+
+
 
 
 
@@ -24,6 +26,10 @@ when you propose solution ask yourself: how does the human brain currently handl
 Provide current code bits and the problems with them.
 
 Propose a clear solution and its benefits to the overall system.
+
+I also want the ability to send queries myself and test it manually.
+
+Whatever code you do write, rememeber to keep it simple and in a jupyter notebook fashion (keep classes and functions to a minimum).
 
 
 

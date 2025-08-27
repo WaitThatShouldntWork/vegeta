@@ -151,7 +151,89 @@
 # - Compare to kernel/episodic control variant if needed later
 
 # %% [markdown]
-# # 14) Checklist
+# # 14) Node Pruning & Entity Resolution (Sleep-like Graph Maintenance)
+# During "sleep" cycles (low activity periods), perform graph maintenance operations:
+# - **Node Pruning**: Remove low-confidence, rarely-accessed nodes; consolidate near-duplicate entities
+# - **Entity Resolution**: Merge entities that refer to the same real-world object across different sources
+# - **Relationship Refinement**: Strengthen high-confidence edges, weaken contradictory ones
+# - **Embedding Updates**: Recompute node embeddings incorporating new facts and connection patterns
+# - **Memory Consolidation**: Transfer episodic interactions into stronger prior beliefs
+# - **Provenance Cleanup**: Archive old sources, update reliability scores based on verification outcomes
+#
+# Implementation Strategy:
+# - Run during low-traffic periods or as background processes
+# - Use confidence thresholds and access patterns to guide pruning decisions
+# - Apply clustering algorithms for entity resolution (semantic + structural similarity)
+# - Maintain audit trails for debugging and rollback
+# - Measure system performance before/after to validate improvements
+
+# %% [markdown]
+# # 15) External Search & Graph Write-back Integration
+# Enable the system to actively gather information and update its knowledge base:
+# 
+# ## Search Integration
+# - **Web Search**: Query Google, Wikipedia, specialized APIs when SEARCH action is chosen
+# - **Document Processing**: Extract facts from retrieved documents using NLP pipelines
+# - **Source Verification**: Cross-reference new information with existing sources
+# - **Confidence Assessment**: Assign reliability scores based on source reputation and consistency
+#
+# ## Graph Write-back Protocol
+# - **Fact Extraction**: Convert unstructured search results into structured graph facts
+# - **Conflict Resolution**: Handle contradictions between new and existing information
+# - **Provenance Tracking**: Link all new facts to their original sources with timestamps
+# - **Version Control**: Maintain graph history for rollback and change tracking
+#
+# ## Integration with Bayesian Inference
+# - **Dynamic Re-ranking**: Update candidate rankings after new facts are added
+# - **Uncertainty Reduction**: Measure how new information reduces posterior entropy
+# - **Iterative Refinement**: Re-run inference with updated graph knowledge
+# - **EIG Validation**: Confirm that SEARCH actions actually provided expected information gain
+#
+# Implementation Priority:
+# 1. Basic web search integration with simple fact extraction
+# 2. Graph write-back with provenance tracking
+# 3. Dynamic re-inference after knowledge updates
+# 4. Advanced conflict resolution and version control
+
+# %% [markdown]
+# # 16) Multi-Agent Collaborative Intelligence
+# Future extension for multiple specialized agents collaborating on complex tasks:
+# - **Domain Specialists**: Separate agents for movies, cybersecurity, finance, etc.
+# - **Meta-Coordinator**: Orchestrates which specialist to consult based on query analysis
+# - **Knowledge Sharing**: Cross-domain transfer learning between specialist agents
+# - **Ensemble Decisions**: Combine confidence estimates from multiple agents
+# - **Specialized Graph Partitions**: Domain-specific subgraphs with cross-domain linking
+#
+# Benefits:
+# - Deeper domain expertise without model bloat
+# - Parallel processing of multi-domain queries
+# - Modular development and maintenance
+# - Better uncertainty calibration through ensemble methods
+
+# %% [markdown]
+# # 17) Adaptive Meta-Learning Architecture (Brain-Inspired)
+# Long-term vision for truly adaptive, brain-like intelligence:
+# 
+# ## Hierarchical Learning Timescales
+# - **Fast Adaptation** (seconds): Immediate context adjustment
+# - **Context Learning** (minutes-hours): Session pattern recognition  
+# - **Domain Adaptation** (days-weeks): Specialized expertise development
+# - **Meta-Learning** (months+): Learning how to learn across domains
+#
+# ## Adaptive Parameter Control
+# - **Dynamic Thresholds**: Context-dependent confidence and uncertainty thresholds
+# - **Attention Allocation**: Information-theoretic feature importance weighting
+# - **Strategy Selection**: Learning which reasoning strategies work in different contexts
+# - **Transfer Learning**: Cross-domain knowledge application
+#
+# ## Neuroplasticity-Inspired Updates
+# - **Synaptic Strength**: Dynamic edge weights based on usage and success
+# - **Structural Plasticity**: Adding/removing graph connections based on patterns
+# - **Homeostatic Regulation**: Maintaining optimal uncertainty levels
+# - **Sleep-like Consolidation**: Offline learning during low-activity periods
+
+# %% [markdown]
+# # 18) Checklist
 # - [ ] Case Bank: schema + Write/ReadNP
 # - [ ] Planner–Executor separation + per-subtask memory
 # - [ ] Tool protocol (graph, search, crawl, code, math) + logs
@@ -159,5 +241,18 @@
 # - [ ] Rewarding and posterior predictive check gate
 # - [ ] Iteration harness + metrics + curves
 # - [ ] Parametric Q(s, c; θ) (stretch)
+# 
+# ## Near-term Priority Items
+# - [ ] Multi-turn conversation state management
+# - [ ] External search integration with write-back
+# - [ ] Basic node pruning and entity resolution
+# - [ ] Adaptive threshold controller
+# - [ ] Context-aware attention mechanism
+#
+# ## Long-term Vision Items  
+# - [ ] Sleep-like graph maintenance cycles
+# - [ ] Multi-agent collaborative intelligence
+# - [ ] Full hierarchical meta-learning architecture
+# - [ ] Neuroplasticity-inspired graph evolution
 
 

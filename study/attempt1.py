@@ -8,9 +8,13 @@
 #TEST_UTTERANCE = "I'm looking for a spy movie with Pierce Brosnan from the 1990s"
 #TEST_UTTERANCE = "What Bond film did Daniel Craig star in that won awards?
 #TEST_UTTERANCE = "Recommend me a film" #combination of 20 questions and recommendation
-#TEST_UTTERANCE = "I'm thinking of a film. Try to guess it." # 20 questions game
+TEST_UTTERANCE = "I'm thinking of a film. Try to guess it." # 20 questions game
 #TEST_UTTERANCE = "I want a recommendation for action movies similar to Heat" # recommendation
-TEST_UTTERANCE = "Do this for me" # purposefully vague
+#TEST_UTTERANCE = "Do this for me" # purposefully vague
+
+# Multi-turn conversation settings
+ENABLE_MULTITURN = True  # Set to True to use session management
+SESSION_ID = None  # Will be set if continuing a session
 
 # %% [markdown]
 # Setup & Imports - Database connection, LLM client, basic utilities
@@ -20,6 +24,14 @@ import requests
 from typing import Dict, List, Any, Optional, Tuple
 from neo4j import GraphDatabase
 import logging
+
+# Import multi-turn session manager
+try:
+    from multiturn_session_manager import MultiTurnSessionManager
+    MULTITURN_AVAILABLE = True
+except ImportError:
+    logger.warning("MultiTurnSessionManager not available - running single-turn only")
+    MULTITURN_AVAILABLE = False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -59,6 +71,28 @@ DEFAULTS = {
 
 
 print(f"Test utterance: '{TEST_UTTERANCE}'")
+
+# Initialize session manager for multi-turn conversations
+session_manager = None
+conversation_context = {}
+
+if ENABLE_MULTITURN and MULTITURN_AVAILABLE:
+    session_manager = MultiTurnSessionManager()
+    if SESSION_ID:
+        # Continue existing session
+        session = session_manager.get_session(SESSION_ID)
+        if session:
+            conversation_context = session_manager.get_conversation_context(SESSION_ID)
+            print(f"Continuing session {SESSION_ID}, turn {len(session.turns)+1}")
+        else:
+            print(f"Session {SESSION_ID} not found or expired")
+            SESSION_ID = None
+    
+    if not SESSION_ID:
+        # Start new session
+        SESSION_ID = session_manager.start_session()
+        print(f"Started new session: {SESSION_ID}")
+
 # %%
 # Initialize Neo4j driver
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
@@ -1255,31 +1289,121 @@ def build_novelty_prior(anchors: List[Dict], observation_u: Dict) -> float:
     
     return novelty_score
 
-# Build all priors
+# Build all priors (with multi-turn conversation history)
 print("Building priors over hidden states...")
 
-# Dialogue act prior (compute first since checklist depends on it)
-dialogue_act_prior = build_dialogue_act_prior(TEST_UTTERANCE)
+# Check if we have conversation history to inform priors
+if session_manager and SESSION_ID:
+    session_state = session_manager.get_session(SESSION_ID)
+    if session_state and session_state.turns:
+        # Build priors from conversation history
+        print("Using conversation history to inform priors...")
+        history_informed_priors = session_manager.build_priors_from_history(session_state)
+        
+        # Use history-informed priors as base, then adjust with current utterance
+        dialogue_act_prior = history_informed_priors.get('dialogue_act', {})
+        checklist_prior = history_informed_priors.get('checklist', {})
+        goal_prior = history_informed_priors.get('goal', {})
+        
+        # Update with current utterance information
+        current_dialogue_acts = build_dialogue_act_prior(TEST_UTTERANCE)
+        current_checklist = build_checklist_prior(observation_u, current_dialogue_acts)
+        current_goal = classify_user_intent_llm(
+            utterance=TEST_UTTERANCE,
+            dialogue_acts=current_dialogue_acts, 
+            extraction=extraction_result
+        )
+        
+        # Blend history and current (70% history, 30% current for continuity)
+        blend_weight = 0.7
+        
+        # Blend dialogue acts
+        for key in set(dialogue_act_prior.keys()) | set(current_dialogue_acts.keys()):
+            hist_val = dialogue_act_prior.get(key, 0.0)
+            curr_val = current_dialogue_acts.get(key, 0.0)
+            dialogue_act_prior[key] = blend_weight * hist_val + (1 - blend_weight) * curr_val
+        
+        # Blend checklist
+        for key in set(checklist_prior.keys()) | set(current_checklist.keys()):
+            hist_val = checklist_prior.get(key, 0.0)
+            curr_val = current_checklist.get(key, 0.0)
+            checklist_prior[key] = blend_weight * hist_val + (1 - blend_weight) * curr_val
+        
+        # Blend goal  
+        for key in set(goal_prior.keys()) | set(current_goal.keys()):
+            hist_val = goal_prior.get(key, 0.0)
+            curr_val = current_goal.get(key, 0.0)
+            goal_prior[key] = blend_weight * hist_val + (1 - blend_weight) * curr_val
+        
+        # Normalize blended priors
+        dialogue_act_total = sum(dialogue_act_prior.values())
+        if dialogue_act_total > 0:
+            dialogue_act_prior = {k: v/dialogue_act_total for k, v in dialogue_act_prior.items()}
+        
+        checklist_total = sum(checklist_prior.values())
+        if checklist_total > 0:
+            checklist_prior = {k: v/checklist_total for k, v in checklist_prior.items()}
+            
+        goal_total = sum(goal_prior.values())
+        if goal_total > 0:
+            goal_prior = {k: v/goal_total for k, v in goal_prior.items()}
+        
+        print("Blended history-informed priors with current utterance")
+    else:
+        print("No conversation history available, using fresh priors")
+        # Fresh conversation - build priors normally
+        dialogue_act_prior = build_dialogue_act_prior(TEST_UTTERANCE)
+        checklist_prior = build_checklist_prior(observation_u, dialogue_act_prior)
+        goal_prior = classify_user_intent_llm(
+            utterance=TEST_UTTERANCE,
+            dialogue_acts=dialogue_act_prior, 
+            extraction=extraction_result
+        )
+else:
+    print("Single-turn mode - building fresh priors")
+    # Single-turn mode - build priors normally
+    dialogue_act_prior = build_dialogue_act_prior(TEST_UTTERANCE)
+    checklist_prior = build_checklist_prior(observation_u, dialogue_act_prior)
+    goal_prior = classify_user_intent_llm(
+        utterance=TEST_UTTERANCE,
+        dialogue_acts=dialogue_act_prior, 
+        extraction=extraction_result
+    )
+
 print(f"Dialogue act prior: {dialogue_act_prior}")
-
-# Checklist prior (now uses dialogue acts and extracted terms)
-checklist_prior = build_checklist_prior(observation_u, dialogue_act_prior)
 print(f"Checklist prior: {checklist_prior}")
-
-# Goal prior using LLM-based intent understanding
-goal_prior = classify_user_intent_llm(
-    utterance=TEST_UTTERANCE,
-    dialogue_acts=dialogue_act_prior, 
-    extraction=extraction_result
-)
 print(f"Goal prior (LLM-based): {goal_prior}")
 
-# Subgraph prior
+# Subgraph prior (enhanced with conversation history hints if available)
 subgraph_prior = build_subgraph_prior(retrieval_context_R['candidates'])
+
+if session_manager and SESSION_ID:
+    session_state = session_manager.get_session(SESSION_ID)
+    if session_state and session_state.turns:
+        history_subgraph_hints = session_manager._build_subgraph_prior_from_history(session_state, {})
+        # Boost subgraph candidates that were recently mentioned with high confidence
+        for cand_id, boost in history_subgraph_hints.items():
+            if cand_id in subgraph_prior:
+                subgraph_prior[cand_id] *= (1.0 + boost)
+        
+        # Renormalize
+        total = sum(subgraph_prior.values())
+        if total > 0:
+            subgraph_prior = {k: v/total for k, v in subgraph_prior.items()}
+
 print(f"Subgraph prior (top 3): {dict(list(subgraph_prior.items())[:3])}")
 
-# Novelty prior
-novelty_prior = build_novelty_prior(retrieval_context_R['anchors'], observation_u)
+# Novelty prior (adapted based on conversation history)
+base_novelty = build_novelty_prior(retrieval_context_R['anchors'], observation_u)
+if session_manager and SESSION_ID:
+    session_state = session_manager.get_session(SESSION_ID)
+    if session_state:
+        novelty_prior = session_manager._adapt_novelty_prior(session_state, base_novelty)
+    else:
+        novelty_prior = base_novelty
+else:
+    novelty_prior = base_novelty
+
 print(f"Novelty prior: {novelty_prior:.3f}")
 
 # Store all priors
@@ -2441,6 +2565,33 @@ print(f"Query: '{TEST_UTTERANCE}'")
 print(f"Action: {decision['action']} → {decision['target']}")
 print(f"Top candidate: {system_state['top_candidate']['anchor_name']}")
 print(f"Confidence: {decision['confidence']:.1%}")
+
+# Save session state for multi-turn continuation
+if session_manager and SESSION_ID:
+    turn_result = {
+        'user_utterance': TEST_UTTERANCE,
+        'action': decision['action'],
+        'target': decision['target'],
+        'confidence': decision['confidence'],
+        'entropy': entropies.get('subgraph', 0.0),
+        'reasoning': decision['reasoning'],
+        'posteriors': posteriors,
+        'priors': priors,
+        'top_candidates': retrieval_context_R['candidates'][:3],  # Top 3 candidates
+        'response': final_question if decision['action'] == 'ASK' else 
+                   (final_answer if decision['action'] == 'ANSWER' else f"Searching for {decision['target']}")
+    }
+    
+    success = session_manager.update_session_state(SESSION_ID, turn_result)
+    if success:
+        print(f"Session state saved for session {SESSION_ID}")
+        context = session_manager.get_conversation_context(SESSION_ID)
+        print(f"Conversation summary: {context.get('conversation_summary', 'None')}")
+        print(f"Total turns: {context.get('turn_count', 0)}")
+    else:
+        print("Failed to save session state")
+
 print(f"System ready for next interaction!")
+
 
 # %%
