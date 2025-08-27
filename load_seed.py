@@ -10,13 +10,10 @@ This script:
 5. Validates data integrity and reports statistics
 
 Usage:
-    python load_seed.py [--reset] [--skip-embeddings] [--skip-indexes]
+    python load_seed.py [--reset] [--deep-reset] [--skip-embeddings] [--skip-indexes]
 """
 
-import os
 import sys
-import json
-import time
 import argparse
 import logging
 from pathlib import Path
@@ -214,15 +211,22 @@ class DatabaseLoader:
             return False
     
     def clear_database(self) -> bool:
-        """Clear all Demo nodes and relationships"""
+        """Clear all nodes, relationships, indexes, and constraints"""
         try:
-            logger.info("🗑️  Clearing existing Demo data...")
+            logger.info("🗑️  Clearing existing data, indexes, and constraints...")
             with self.driver.session(database=NEO4J_DATABASE) as session:
-                # Clear Demo nodes
-                result = session.run("MATCH (n:Demo) DETACH DELETE n")
+                
+                # 1. Drop all indexes first (vector indexes, fulltext, standard)
+                self._drop_all_indexes(session)
+                
+                # 2. Drop all constraints
+                self._drop_all_constraints(session)
+                
+                # 3. Clear all nodes and relationships
+                result = session.run("MATCH (n) DETACH DELETE n")
                 summary = result.consume()
                 
-                # Clear orphaned SlotValues (if any)
+                # 4. Clear orphaned SlotValues (if any)
                 result = session.run("""
                     MATCH (sv:SlotValue) 
                     WHERE NOT (sv)<-[:HAS_SLOT]-() 
@@ -238,6 +242,79 @@ class DatabaseLoader:
             logger.error(f"✗ Failed to clear database: {e}")
             return False
     
+    def clear_data_only(self) -> bool:
+        """Clear only nodes and relationships (keep indexes and constraints)"""
+        try:
+            logger.info("🗑️  Clearing existing data (keeping indexes and constraints)...")
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                # Clear all nodes
+                result = session.run("MATCH (n) DETACH DELETE n")
+                summary = result.consume()
+                
+                # Clear orphaned SlotValues (if any)
+                result = session.run("""
+                    MATCH (sv:SlotValue) 
+                    WHERE NOT (sv)<-[:HAS_SLOT]-() 
+                    DELETE sv
+                """)
+                summary2 = result.consume()
+                
+                deleted = summary.counters.nodes_deleted + summary2.counters.nodes_deleted
+                logger.info(f"✓ Cleared {deleted} nodes")
+                return True
+                
+        except Exception as e:
+            logger.error(f"✗ Failed to clear data: {e}")
+            return False
+    
+    def _drop_all_indexes(self, session) -> None:
+        """Drop all indexes (vector, fulltext, standard)"""
+        try:
+            logger.info("🗂️  Dropping all indexes...")
+            
+            # Get all indexes
+            result = session.run("SHOW INDEXES")
+            indexes = [record['name'] for record in result if record['name']]
+            
+            dropped_count = 0
+            for index_name in indexes:
+                try:
+                    session.run(f"DROP INDEX {index_name}")
+                    dropped_count += 1
+                    logger.debug(f"  Dropped index: {index_name}")
+                except ClientError as e:
+                    # Some indexes might fail to drop (e.g., system indexes)
+                    logger.debug(f"  Could not drop index {index_name}: {e}")
+            
+            logger.info(f"✓ Dropped {dropped_count} indexes")
+            
+        except Exception as e:
+            logger.warning(f"⚠ Could not drop all indexes: {e}")
+    
+    def _drop_all_constraints(self, session) -> None:
+        """Drop all constraints"""
+        try:
+            logger.info("🔒 Dropping all constraints...")
+            
+            # Get all constraints
+            result = session.run("SHOW CONSTRAINTS")
+            constraints = [record['name'] for record in result if record['name']]
+            
+            dropped_count = 0
+            for constraint_name in constraints:
+                try:
+                    session.run(f"DROP CONSTRAINT {constraint_name}")
+                    dropped_count += 1
+                    logger.debug(f"  Dropped constraint: {constraint_name}")
+                except ClientError as e:
+                    # Some constraints might fail to drop (e.g., system constraints)
+                    logger.debug(f"  Could not drop constraint {constraint_name}: {e}")
+            
+            logger.info(f"✓ Dropped {dropped_count} constraints")
+            
+        except Exception as e:
+            logger.warning(f"⚠ Could not drop all constraints: {e}")
+    
     def generate_embeddings(self) -> bool:
         """Generate embeddings for all entities"""
         try:
@@ -246,7 +323,7 @@ class DatabaseLoader:
             with self.driver.session(database=NEO4J_DATABASE) as session:
                 # Get all entities that need embeddings
                 result = session.run("""
-                    MATCH (e:Entity:Demo)
+                    MATCH (e:Entity)
                     RETURN e.id as id, e.name as name, e.aliases as aliases,
                            coalesce(e.plot, e.summary, '') as description
                 """)
@@ -274,7 +351,7 @@ class DatabaseLoader:
                     if sem_emb is not None:
                         # Store embedding in database
                         session.run("""
-                            MATCH (e:Entity:Demo {id: $id})
+                            MATCH (e:Entity {id: $id})
                             SET e.sem_emb = $embedding,
                                 e.embed_text = $embed_text,
                                 e.embed_timestamp = datetime()
@@ -406,14 +483,14 @@ class DatabaseLoader:
                 node_types = ['Entity', 'Type', 'SlotValue', 'Document', 'Checklist', 'Fact']
                 
                 for node_type in node_types:
-                    result = session.run(f"MATCH (n:{node_type}:Demo) RETURN count(n) as count")
+                    result = session.run(f"MATCH (n:{node_type}) RETURN count(n) as count")
                     counts[node_type] = result.single()['count']
                 
                 validation_results['node_counts'] = counts
                 
                 # Check embeddings
                 result = session.run("""
-                    MATCH (e:Entity:Demo)
+                    MATCH (e:Entity)
                     RETURN count(e) as total_entities,
                            count(e.sem_emb) as entities_with_embeddings
                 """)
@@ -483,7 +560,8 @@ class DatabaseLoader:
 
 def main():
     parser = argparse.ArgumentParser(description='Load VEGETA seed data with full data engineering pipeline')
-    parser.add_argument('--reset', action='store_true', help='Clear existing Demo data before loading')
+    parser.add_argument('--reset', action='store_true', help='Clear existing nodes and relationships before loading')
+    parser.add_argument('--deep-reset', action='store_true', help='Clear everything: nodes, relationships, indexes, and constraints')
     parser.add_argument('--skip-embeddings', action='store_true', help='Skip embedding generation')
     parser.add_argument('--skip-indexes', action='store_true', help='Skip index creation')
     parser.add_argument('--seed-file', default=SEED_FILE, help='Path to seed.cypher file')
@@ -502,8 +580,11 @@ def main():
             sys.exit(1)
         
         # Clear existing data if requested
-        if args.reset:
+        if args.deep_reset:
             if not loader.clear_database():
+                sys.exit(1)
+        elif args.reset:
+            if not loader.clear_data_only():
                 sys.exit(1)
         
         # Execute seed file

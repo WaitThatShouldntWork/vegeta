@@ -1,14 +1,16 @@
 # %% [markdown]
 # # Bayesian Active Inference Decider
+# This is aBayesian Active Inference decider that chooses among Answer / Ask / Search 
+# using Expected Information Gain (EIG) and bayesian brain theory.
+# The intent behind this system is to be able to handle unclear queries and ultimately ask good questions back.
 
-
-# %% [markdown]
-# Test Configuration - Change this to test different queries
+# %%
 #TEST_UTTERANCE = "I'm looking for a spy movie with Pierce Brosnan from the 1990s"
-TEST_UTTERANCE = "What Bond film did Daniel Craig star in that won awards?"
-#TEST_UTTERANCE = "Recommend me a film"
-#TEST_UTTERANCE = "I'm thinking of a film. Try to guess it."
-#TEST_UTTERANCE = "I want a recommendation for action movies similar to Heat"
+#TEST_UTTERANCE = "What Bond film did Daniel Craig star in that won awards?
+#TEST_UTTERANCE = "Recommend me a film" #combination of 20 questions and recommendation
+#TEST_UTTERANCE = "I'm thinking of a film. Try to guess it." # 20 questions game
+#TEST_UTTERANCE = "I want a recommendation for action movies similar to Heat" # recommendation
+TEST_UTTERANCE = "Do this for me" # purposefully vague
 
 # %% [markdown]
 # Setup & Imports - Database connection, LLM client, basic utilities
@@ -115,8 +117,50 @@ def call_ollama_json(prompt: str, model: str = DEFAULT_MODEL) -> Dict[str, Any]:
         logger.error(f"Ollama JSON call failed: {e}")
         return {}
 
+def analyze_query_clarity(utterance: str) -> Dict[str, Any]:
+    """Analyze query clarity and specificity using LLM"""
+    
+    analysis_prompt = f"""Analyze this user query for clarity and specificity. Return valid JSON only:
+
+{{
+    "clarity": "clear|moderate|vague|extremely_vague",
+    "specificity": "specific|general|abstract", 
+    "domain_identifiable": true/false,
+    "immediate_clarification_needed": true/false,
+    "clarification_type": "task_domain|intent|specifics|none",
+    "reasoning": "brief explanation of the assessment"
+}}
+
+Rules for analysis:
+- clarity: How understandable is the request?
+  - clear: Specific, actionable request
+  - moderate: Somewhat unclear but processable  
+  - vague: Unclear what user wants
+  - extremely_vague: No clear meaning (like "do this", "help me", "it")
+- immediate_clarification_needed: true if you cannot proceed without asking for more info
+- clarification_type: what type of clarification is most needed?
+
+Query: "{utterance}"
+
+JSON:"""
+    
+    try:
+        result = call_ollama_json(analysis_prompt)
+        return result
+    except Exception as e:
+        logger.error(f"Query analysis failed: {e}")
+        # Fallback analysis
+        return {
+            'clarity': 'moderate',
+            'specificity': 'general',
+            'domain_identifiable': False,
+            'immediate_clarification_needed': False,
+            'clarification_type': 'none',
+            'reasoning': 'Analysis failed, using defaults'
+        }
+
 def extract_entities_llm(utterance: str) -> Dict[str, Any]:
-    """Extract entities and terms using LLM with JSON schema validation"""
+    """Extract entities and terms using LLM with JSON schema validation and query analysis"""
     
     extraction_prompt = f"""Extract information from this user utterance. Return valid JSON only with this exact structure:
 
@@ -151,11 +195,15 @@ JSON:"""
         # Dedupe and clean canonical terms
         canonical_terms = list(dict.fromkeys([term.lower().strip() for term in canonical_terms if term.strip()]))
         
+        # Add query analysis as a separate LLM call for reliability
+        query_analysis = analyze_query_clarity(utterance)
+        
         return {
             'canonical_terms': canonical_terms,
             'entities': entities,
             'numbers': numbers,
-            'dates': dates
+            'dates': dates,
+            'query_analysis': query_analysis
         }
         
     except Exception as e:
@@ -264,7 +312,7 @@ def find_anchor_nodes(u_sem: np.ndarray, k: int = DEFAULTS['K_anchors']) -> List
     
     # Query for entities with embeddings (assuming they exist in your graph)
     cypher_query = """
-    MATCH (e:Entity:Demo)
+    MATCH (e:Entity)
     WHERE e.sem_emb IS NOT NULL
     RETURN e.id as id, e.name as name, e.sem_emb as sem_emb, labels(e) as labels
     LIMIT 100
@@ -280,7 +328,7 @@ def find_anchor_nodes(u_sem: np.ndarray, k: int = DEFAULTS['K_anchors']) -> List
             if not nodes:
                 # Fallback: get nodes without embeddings and use name similarity
                 fallback_query = """
-                MATCH (e:Entity:Demo)
+                MATCH (e:Entity)
                 RETURN e.id as id, e.name as name, labels(e) as labels
                 LIMIT 50
                 """
@@ -341,8 +389,8 @@ def expand_subgraphs(anchors: List[Dict], hops: int = DEFAULTS['hops']) -> List[
         try:
             # Simple k-hop expansion
             cypher_query = f"""
-            MATCH path = (start:Entity:Demo {{id: $anchor_id}})-[*1..{hops}]-(connected)
-            WHERE connected:Entity:Demo OR connected:SlotValue
+            MATCH path = (start:Entity {{id: $anchor_id}})-[*1..{hops}]-(connected)
+            WHERE connected:Entity OR connected:SlotValue
             WITH start, connected, path
             RETURN start.id as anchor_id,
                    collect(DISTINCT connected.id) as connected_ids,
@@ -383,7 +431,7 @@ def link_entities_to_graph(entities: List[Dict]) -> List[str]:
         try:
             # Simple name matching (would use full-text index in production)
             cypher_query = """
-            MATCH (e:Entity:Demo)
+            MATCH (e:Entity)
             WHERE toLower(e.name) CONTAINS toLower($entity_name)
                OR any(alias IN e.aliases WHERE toLower(alias) CONTAINS toLower($entity_name))
             RETURN e.id as id, e.name as name
@@ -403,7 +451,182 @@ def link_entities_to_graph(entities: List[Dict]) -> List[str]:
     
     return linked_ids
 
-# Execute retrieval
+# New helpers: active checklist target labels, candidate enumeration, and neighbors
+def get_active_checklist_and_target_labels() -> Tuple[Optional[str], List[str]]:
+    """Determine the active checklist and its primary target labels in a generic way.
+
+    Strategy (domain-agnostic):
+    - Prefer a checklist that has at least one required SlotSpec with expect_labels defined.
+    - Prefer SlotSpecs with cardinality ONE (they typically denote the primary target).
+    - If multiple match, pick the first arbitrarily (we're not baking in domain rules).
+    """
+    try:
+        with driver.session(database=NEO4J_DATABASE) as session:
+            cypher = """
+            MATCH (ss:SlotSpec)
+            RETURN ss.checklist_name AS checklist_name,
+                   ss.name AS name,
+                   ss.expect_labels AS expect_labels,
+                   ss.required AS required,
+                   ss.cardinality AS cardinality
+            ORDER BY required DESC
+            """
+            records = list(session.run(cypher))
+            # Filter to those with expect_labels
+            candidates: List[Dict[str, Any]] = []
+            for r in records:
+                expect_labels = r.get("expect_labels") or []
+                if expect_labels:
+                    candidates.append({
+                        "checklist_name": r.get("checklist_name"),
+                        "name": r.get("name"),
+                        "expect_labels": expect_labels,
+                        "required": bool(r.get("required")),
+                        "cardinality": r.get("cardinality") or "ONE"
+                    })
+            if not candidates:
+                return None, []
+
+            # Prefer required and cardinality ONE
+            def sort_key(x: Dict[str, Any]):
+                return (
+                    1 if x["required"] else 0,
+                    1 if str(x["cardinality"]).upper() == "ONE" else 0,
+                    -len(x["expect_labels"])  # fewer labels preferred for specificity
+                )
+            candidates.sort(key=sort_key, reverse=True)
+            picked = candidates[0]
+            return picked["checklist_name"], picked["expect_labels"]
+    except Exception as e:
+        logger.error(f"Failed to fetch checklist target labels: {e}")
+        return None, []
+
+def enumerate_target_candidates_from_anchors(anchors: List[Dict[str, Any]], target_labels: List[str],
+                                             hops: int = DEFAULTS['hops'], decay: float = 0.8,
+                                             limit_per_anchor: int = 50) -> List[Dict[str, Any]]:
+    """Enumerate candidate entities of the target labels within k hops of the anchors.
+
+    - Score each candidate by max over anchors of (anchor_score * decay^(distance-1)).
+    - Returns a list of candidate dicts with id, entity_id, name, labels, retrieval_score, best_anchor info.
+    """
+    if not anchors or not target_labels:
+        return []
+
+    # Map candidate_id -> best info
+    candidate_map: Dict[str, Dict[str, Any]] = {}
+
+    try:
+        with driver.session(database=NEO4J_DATABASE) as session:
+            for anchor in anchors:
+                anchor_id = anchor.get('id')
+                anchor_name = anchor.get('name')
+                anchor_score = float(anchor.get('s_combined', 0.0))
+                if not anchor_id:
+                    continue
+
+                # Use variable-length paths and min(length) to avoid shortestPath start=end issues
+                cypher = f"""
+                MATCH (start:Entity {{id: $anchor_id}})
+                MATCH p = (start)-[*1..{hops}]-(cand)
+                WHERE cand.id <> start.id
+                  AND any(lbl IN labels(cand) WHERE lbl IN $target_labels)
+                WITH cand, min(length(p)) AS dist
+                RETURN cand.id AS id, cand.name AS name, labels(cand) AS labels, dist
+                ORDER BY dist ASC
+                LIMIT $limit
+                """
+                results = session.run(cypher, anchor_id=anchor_id, target_labels=target_labels, limit=limit_per_anchor)
+                for rec in results:
+                    cand_id = rec["id"]
+                    cand_name = rec["name"]
+                    cand_labels = rec["labels"] or []
+                    dist = max(1, int(rec["dist"]))
+                    # Path-decayed score from this anchor
+                    score = anchor_score * (decay ** (dist - 1))
+
+                    existing = candidate_map.get(cand_id)
+                    if (existing is None) or (score > existing.get('retrieval_score', 0.0)):
+                        candidate_map[cand_id] = {
+                            'entity_id': cand_id,
+                            'name': cand_name,
+                            'labels': cand_labels,
+                            'retrieval_score': float(score),
+                            'best_anchor': {
+                                'id': anchor_id,
+                                'name': anchor_name,
+                                'dist': dist,
+                                'anchor_score': anchor_score
+                            }
+                        }
+    except Exception as e:
+        logger.error(f"Failed to enumerate target candidates: {e}")
+        return []
+
+    # Convert to list and sort by retrieval_score
+    candidates = sorted(candidate_map.values(), key=lambda x: x['retrieval_score'], reverse=True)
+    return candidates
+
+def get_candidate_neighbors(candidate_id: str) -> Tuple[List[str], List[str]]:
+    """Return 1-hop neighbor ids and names for a candidate entity."""
+    try:
+        with driver.session(database=NEO4J_DATABASE) as session:
+            cypher = """
+            MATCH (c:Entity {id: $id})-[r]-(n)
+            RETURN collect(DISTINCT n.id) AS ids, collect(DISTINCT n.name) AS names
+            """
+            rec = session.run(cypher, id=candidate_id).single()
+            if rec:
+                return rec.get('ids') or [], rec.get('names') or []
+    except Exception as e:
+        logger.error(f"Failed to fetch neighbors for {candidate_id}: {e}")
+    return [], []
+
+def compute_generic_term_evidence(candidate_id: str, canonical_terms: List[str]) -> Dict[str, Any]:
+    """Compute generic evidence by matching canonical terms to SlotValue slots and Fact predicate names.
+
+    This is domain-agnostic: it checks lowercase substring matches.
+    Returns a dict with a normalized score in [0,1].
+    """
+    terms = [t.lower() for t in (canonical_terms or []) if isinstance(t, str) and t.strip()]
+    if not terms:
+        return {"term_evidence_score": 0.0, "matches": {}}
+
+    try:
+        with driver.session(database=NEO4J_DATABASE) as session:
+            cypher = """
+            MATCH (c:Entity {id: $id})
+            OPTIONAL MATCH (c)-[:HAS_SLOT]->(sv:SlotValue)
+            OPTIONAL MATCH (f1:Fact)-[:SUBJECT]->(c)
+            OPTIONAL MATCH (f2:Fact)-[:OBJECT]->(c)
+            OPTIONAL MATCH (f1)-[:PREDICATE]->(rt1:RelationType)
+            OPTIONAL MATCH (f2)-[:PREDICATE]->(rt2:RelationType)
+            RETURN collect(DISTINCT toLower(sv.slot)) AS slots,
+                   collect(DISTINCT toLower(rt1.name)) AS preds1,
+                   collect(DISTINCT toLower(rt2.name)) AS preds2
+            """
+            rec = session.run(cypher, id=candidate_id).single()
+            slots: List[str] = rec.get('slots') or []
+            preds1: List[str] = rec.get('preds1') or []
+            preds2: List[str] = rec.get('preds2') or []
+            preds = list(dict.fromkeys([p for p in (preds1 + preds2) if p]))
+            matches: Dict[str, List[str]] = {}
+            hit_count = 0
+            for t in terms:
+                matched = []
+                if any(t in (s or '') for s in slots):
+                    matched.append('slot')
+                if any(t in (p or '') for p in preds):
+                    matched.append('predicate')
+                if matched:
+                    matches[t] = matched
+                    hit_count += 1
+            score = hit_count / max(len(terms), 1)
+            return {"term_evidence_score": float(score), "matches": matches}
+    except Exception as e:
+        logger.error(f"Failed to compute term evidence for {candidate_id}: {e}")
+        return {"term_evidence_score": 0.0, "matches": {}}
+
+# Execute retrieval (updated: target candidate enumeration)
 print("Starting graph retrieval...")
 
 # Find anchor nodes using semantic similarity
@@ -416,11 +639,74 @@ for anchor in anchors[:3]:  # Show top 3
 linked_entity_ids = link_entities_to_graph(extraction_result['entities'])
 print(f"\nLinked entities: {linked_entity_ids}")
 
-# Expand into candidate subgraphs
-candidates = expand_subgraphs(anchors)
-print(f"\nGenerated {len(candidates)} candidate subgraphs:")
+# Determine active checklist target labels
+active_checklist_name, target_labels = get_active_checklist_and_target_labels()
+if not target_labels:
+    logger.warning("No target labels found from checklist; falling back to subgraph expansion.")
+    candidates = expand_subgraphs(anchors)
+else:
+    # Enumerate target candidates near anchors
+    target_candidates = enumerate_target_candidates_from_anchors(anchors, target_labels)
+    # Attach neighbor info (ids + names) for feature generation
+    candidates = []
+    for i, cand in enumerate(target_candidates):
+        neighbor_ids, neighbor_names = get_candidate_neighbors(cand['entity_id'])
+        candidates.append({
+            'id': f"cand_{i}",
+            'anchor_id': cand['best_anchor']['id'],
+            'anchor_name': cand['best_anchor']['name'],
+            'connected_ids': neighbor_ids,
+            'connected_names': neighbor_names,
+            'subgraph_size': len(neighbor_ids),
+            'anchor_score': cand['best_anchor']['anchor_score'],
+            'retrieval_score': cand['retrieval_score'],
+            'entity_id': cand['entity_id'],
+            'entity_name': cand['name'],
+            'entity_labels': cand['labels']
+        })
+
+    # Fallbacks if no target candidates found
+    if not candidates:
+        # 1) Use anchors that already match target labels
+        label_matched = [a for a in anchors if any(lbl in (a.get('labels') or []) for lbl in target_labels)]
+        for j, a in enumerate(label_matched):
+            neighbor_ids, neighbor_names = get_candidate_neighbors(a['id'])
+            candidates.append({
+                'id': f"anchor_cand_{j}",
+                'anchor_id': a['id'],
+                'anchor_name': a['name'],
+                'connected_ids': neighbor_ids,
+                'connected_names': neighbor_names,
+                'subgraph_size': len(neighbor_ids),
+                'anchor_score': a.get('s_combined', 0.0),
+                'retrieval_score': a.get('s_combined', 0.0),
+                'entity_id': a['id'],
+                'entity_name': a['name'],
+                'entity_labels': a.get('labels') or []
+            })
+
+    if not candidates:
+        # 2) Fall back to original subgraph expansion, adapted into candidate shape
+        fallback = expand_subgraphs(anchors)
+        for k, fc in enumerate(fallback):
+            candidates.append({
+                'id': f"fallback_{k}",
+                'anchor_id': fc['anchor_id'],
+                'anchor_name': fc['anchor_name'],
+                'connected_ids': fc.get('connected_ids', []),
+                'connected_names': fc.get('connected_names', []),
+                'subgraph_size': fc.get('subgraph_size', 0),
+                'anchor_score': fc.get('anchor_score', 0.0),
+                'retrieval_score': fc.get('retrieval_score', 0.0),
+                'entity_id': fc.get('anchor_id'),
+                'entity_name': fc.get('anchor_name'),
+                'entity_labels': []
+            })
+
+print(f"\nGenerated {len(candidates)} candidate targets:")
 for i, candidate in enumerate(candidates[:3]):  # Show top 3
-    print(f"  Candidate {i}: anchor={candidate['anchor_name']}, size={candidate['subgraph_size']}, score={candidate['retrieval_score']:.3f}")
+    shown_name = candidate.get('entity_name') or candidate.get('anchor_name')
+    print(f"  Candidate {i}: target={shown_name}, size={candidate['subgraph_size']}, score={candidate['retrieval_score']:.3f}")
 
 # Store retrieval context R
 retrieval_context_R = {
@@ -428,7 +714,9 @@ retrieval_context_R = {
     'linked_entity_ids': linked_entity_ids,
     'candidates': candidates,
     'expansion_params': {'hops': DEFAULTS['hops'], 'k_anchors': DEFAULTS['K_anchors']},
-    'utterance': TEST_UTTERANCE
+    'utterance': TEST_UTTERANCE,
+    'active_checklist': active_checklist_name,
+    'target_labels': target_labels
 }
 
 print(f"\nRetrieval context R created with {len(candidates)} candidates")
@@ -439,25 +727,42 @@ print(f"\nRetrieval context R created with {len(candidates)} candidates")
 
 # %%
 def compute_u_struct_obs(candidate: Dict[str, Any]) -> Dict[str, int]:
-    """Compute observed structural features for a candidate subgraph"""
+    """Compute observed structural features for a candidate-centered neighborhood.
+
+    Generic behavior:
+    - Count neighbor label frequencies (excluding Demo) and edge types around candidate entity_id if present;
+      otherwise fall back to original anchor/connected_ids logic.
+    """
     
     try:
-        # Query structural features of the subgraph
-        cypher_query = """
-        MATCH (anchor:Entity:Demo {id: $anchor_id})
-        OPTIONAL MATCH (anchor)-[r]-(connected)
-        WHERE connected.id IN $connected_ids
-        RETURN 
-            count(DISTINCT connected) as node_count,
-            count(DISTINCT type(r)) as edge_type_count,
-            collect(DISTINCT labels(connected)) as node_label_groups,
-            collect(DISTINCT type(r)) as edge_types
-        """
+        if candidate.get('entity_id'):
+            # Candidate-centric
+            cypher_query = """
+            MATCH (c:Entity {id: $cid})
+            OPTIONAL MATCH (c)-[r]-(n)
+            RETURN 
+                count(DISTINCT n) as node_count,
+                count(DISTINCT type(r)) as edge_type_count,
+                collect(DISTINCT labels(n)) as node_label_groups,
+                collect(DISTINCT type(r)) as edge_types
+            """
+            params = {"cid": candidate['entity_id']}
+        else:
+            # Fallback to anchor-based computation
+            cypher_query = """
+            MATCH (anchor:Entity {id: $anchor_id})
+            OPTIONAL MATCH (anchor)-[r]-(connected)
+            WHERE connected.id IN $connected_ids
+            RETURN 
+                count(DISTINCT connected) as node_count,
+                count(DISTINCT type(r)) as edge_type_count,
+                collect(DISTINCT labels(connected)) as node_label_groups,
+                collect(DISTINCT type(r)) as edge_types
+            """
+            params = {"anchor_id": candidate['anchor_id'], "connected_ids": candidate['connected_ids']}
         
         with driver.session(database=NEO4J_DATABASE) as session:
-            result = session.run(cypher_query, 
-                               anchor_id=candidate['anchor_id'],
-                               connected_ids=candidate['connected_ids'])
+            result = session.run(cypher_query, **params)
             record = result.single()
             
             if record:
@@ -470,8 +775,7 @@ def compute_u_struct_obs(candidate: Dict[str, Any]) -> Dict[str, int]:
                 # Count label occurrences
                 label_counts = {}
                 for label in all_labels:
-                    if label != 'Demo':  # Skip the Demo label
-                        label_counts[f"label_{label}"] = label_counts.get(f"label_{label}", 0) + 1
+                    label_counts[f"label_{label}"] = label_counts.get(f"label_{label}", 0) + 1
                 
                 # Count edge types
                 edge_counts = {}
@@ -496,59 +800,96 @@ def compute_u_struct_obs(candidate: Dict[str, Any]) -> Dict[str, int]:
     return {'total_nodes': candidate.get('subgraph_size', 0)}
 
 def generate_expected_terms(candidate: Dict[str, Any]) -> List[str]:
-    """Generate expected terms that should appear if this candidate is correct"""
+    """Generate expected terms with a tighter, candidate-centric scope (domain-agnostic)."""
     
-    expected_terms = []
-    
-    # Add node names (lowercased and split)
-    for name in candidate.get('connected_names', []):
-        if name:
-            # Split compound names and add individual words
-            words = name.lower().replace('-', ' ').replace(':', ' ').split()
-            expected_terms.extend([w for w in words if len(w) > 2])
-    
-    # Add anchor name
-    if candidate.get('anchor_name'):
-        anchor_words = candidate['anchor_name'].lower().replace('-', ' ').split()
-        expected_terms.extend([w for w in anchor_words if len(w) > 2])
-    
-    # Query for slot values (genres, etc.) associated with this subgraph
+    expected_terms: List[str] = []
+
+    # 1) Candidate entity name words
+    if candidate.get('entity_name'):
+        words = candidate['entity_name'].lower().replace('-', ' ').replace(':', ' ').split()
+        expected_terms.extend([w for w in words if len(w) > 2])
+
+    # 2) Direct SlotValue values for the candidate entity
     try:
-        cypher_query = """
-        MATCH (anchor:Entity:Demo {id: $anchor_id})-[:HAS_SLOT]->(sv:SlotValue)
-        RETURN sv.slot as slot, sv.value as value
-        """
-        
         with driver.session(database=NEO4J_DATABASE) as session:
-            result = session.run(cypher_query, anchor_id=candidate['anchor_id'])
-            
+            if candidate.get('entity_id'):
+                cypher_query = """
+                MATCH (c:Entity {id: $cid})-[:HAS_SLOT]->(sv:SlotValue)
+                RETURN sv.slot as slot, sv.value as value
+                """
+                params = {"cid": candidate['entity_id']}
+            else:
+                cypher_query = """
+                MATCH (anchor:Entity {id: $anchor_id})-[:HAS_SLOT]->(sv:SlotValue)
+                RETURN sv.slot as slot, sv.value as value
+                """
+                params = {"anchor_id": candidate['anchor_id']}
+
+            result = session.run(cypher_query, **params)
             for record in result:
                 if record['value']:
-                    # Add slot values as expected terms
-                    slot_words = record['value'].lower().split()
+                    slot_words = str(record['value']).lower().split()
                     expected_terms.extend([w for w in slot_words if len(w) > 2])
-                    
-                    # Add slot type as term
-                    if record['slot']:
-                        expected_terms.append(record['slot'].lower())
+                if record['slot']:
+                    expected_terms.append(str(record['slot']).lower())
     
     except Exception as e:
         logger.error(f"Failed to get slot values for {candidate['anchor_id']}: {e}")
     
+    # 3) Optionally a small sample of 1-hop neighbor names (kept small to avoid noise)
+    for name in (candidate.get('connected_names') or [])[:3]:
+        if name:
+            words = name.lower().replace('-', ' ').replace(':', ' ').split()
+            expected_terms.extend([w for w in words if len(w) > 2])
+
     # Dedupe and limit
     expected_terms = list(dict.fromkeys(expected_terms))[:DEFAULTS['N_expected']]
     return expected_terms
 
 def compute_delta_distances(observation_u: Dict, candidate: Dict, expected_terms: List[str]) -> Dict[str, float]:
-    """Compute delta distances for semantic, structural, and terms channels"""
+    """Compute delta distances for semantic, structural, and terms channels.
+
+    Structural distance is checklist-driven (generic):
+    - If active checklist and its SlotSpecs are available, reduce distance when
+      expected labels are present around the candidate; increase when absent.
+    - Otherwise fall back to a mild default.
+    """
     
     # δ_sem: semantic distance (placeholder - would use actual subgraph embedding)
     # For now, use inverse of retrieval score as a proxy
     delta_sem = max(0.0, 1.0 - candidate.get('retrieval_score', 0.0))
     
-    # δ_struct: structural distance (placeholder - needs expected structure from checklist)
-    # For now, just use a default
+    # δ_struct: checklist-driven
     delta_struct = 0.3
+    try:
+        active_checklist = retrieval_context_R.get('active_checklist')
+        if active_checklist and candidate.get('u_struct_obs'):
+            struct_obs = candidate['u_struct_obs']
+            with driver.session(database=NEO4J_DATABASE) as session:
+                cypher = """
+                MATCH (ss:SlotSpec {checklist_name: $cl})
+                RETURN ss.name AS name, ss.expect_labels AS expect_labels, ss.required AS required
+                """
+                specs = [r.data() for r in session.run(cypher, cl=active_checklist)]
+            # Compute penalties for missing expected labels; rewards for present
+            missing_pen = 0.0
+            present_bonus = 0.0
+            for spec in specs:
+                labels = spec.get('expect_labels') or []
+                if not labels:
+                    continue
+                has_any = any(struct_obs.get(f"label_{lbl}", 0) > 0 for lbl in labels)
+                if has_any:
+                    present_bonus += 0.05
+                else:
+                    if bool(spec.get('required')):
+                        missing_pen += 0.15
+                    else:
+                        missing_pen += 0.05
+            # Map to distance with floor/ceiling
+            delta_struct = np.clip(0.3 + missing_pen - present_bonus, 0.0, 1.0)
+    except Exception:
+        pass
     
     # δ_terms: terms distance using Jaccard
     u_terms_set = observation_u.get('u_terms_set', set())
@@ -626,13 +967,13 @@ print(f"\nUpdated retrieval context with {len(candidates_sorted)} processed cand
 # Construct priors p(z_checklist), p(z_goal), p(z_subgraph), etc.
 
 # %%
-def build_checklist_prior() -> Dict[str, float]:
-    """Build prior over checklists based on domain frequency and context"""
+def build_checklist_prior(observation_u: Dict, dialogue_act_prior: Dict) -> Dict[str, float]:
+    """Build prior over checklists based on dialogue acts and extracted terms"""
     
     # Query available checklists
     try:
         with driver.session(database=NEO4J_DATABASE) as session:
-            result = session.run("MATCH (c:Checklist:Demo) RETURN c.name as name, c.description as description")
+            result = session.run("MATCH (c:Checklist) RETURN c.name as name, c.description as description")
             checklists = list(result)
     except Exception as e:
         logger.error(f"Failed to query checklists: {e}")
@@ -646,59 +987,146 @@ def build_checklist_prior() -> Dict[str, float]:
             {'name': 'Verify', 'description': 'Verify facts or properties'}
         ]
     
-    # Generic prior with slight bias toward identification-style tasks
+    # Extract signals from observation and dialogue acts
+    canonical_terms = observation_u.get('u_meta', {}).get('extraction', {}).get('canonical_terms', [])
+    dialogue_acts = dialogue_act_prior or {}
+    
+    # Intent-driven checklist selection
     checklist_prior = {}
     total_mass = 0.95  # Leave 5% for "none-of-the-above"
     
-    for checklist in checklists:
-        name = checklist['name']
-        if 'Identify' in name:
-            checklist_prior[name] = 0.5  # Strong bias toward identification for this query type
-        elif 'Recommend' in name:
-            checklist_prior[name] = 0.3
-        elif 'Verify' in name:
-            checklist_prior[name] = 0.15
-        else:
-            checklist_prior[name] = 0.1
+    # Strong signal: "recommendation" in canonical terms
+    has_recommend_term = any('recommend' in term.lower() for term in canonical_terms)
+    has_similar_pattern = any(word in ' '.join(canonical_terms).lower() for word in ['similar', 'like', 'comparable'])
+    request_score = dialogue_acts.get('request', 0.0)
     
-    # Normalize
-    current_sum = sum(checklist_prior.values())
-    if current_sum > 0:
-        for name in checklist_prior:
-            checklist_prior[name] = (checklist_prior[name] / current_sum) * total_mass
+    logger.info(f"Intent signals: recommend_term={has_recommend_term}, similar_pattern={has_similar_pattern}, request_score={request_score:.3f}")
     
-    checklist_prior['None'] = 0.05  # None-of-the-above option
+    # For most interactions, operate without rigid procedural constraints
+    # Only use formal checklists when they exist and are clearly relevant
+    if checklists:
+        # Apply loose heuristic matching to existing formal checklists
+        for checklist in checklists:
+            name = checklist['name']
+            description = checklist.get('description', '').lower()
+            
+            # Heuristic matching - don't force it
+            if ('identify' in name.lower() or 'find' in description):
+                if has_recommend_term:
+                    checklist_prior[name] = 0.1  # Low weight when intent doesn't match
+                else:
+                    checklist_prior[name] = 0.4  # Moderate weight
+            elif 'recommend' in name.lower() or 'suggest' in description:
+                if has_recommend_term:
+                    checklist_prior[name] = 0.4  # Moderate weight 
+                else:
+                    checklist_prior[name] = 0.1  # Low weight
+            else:
+                checklist_prior[name] = 0.2  # Neutral weight for unknown checklists
+        
+        logger.info(f"Matched {len(checklists)} formal checklists with flexible weights")
+    
+    # Store the detected intent for decision-making (independent of checklists)
+    if has_recommend_term or has_similar_pattern:
+        logger.info("Detected recommendation intent - will route to SEARCH in decision phase")
+    elif request_score > 0.4:
+        logger.info("Detected request intent - decision phase will determine best action")
+    else:
+        logger.info("Detected general inquiry - will use standard slot-based approach")
+    
+    # Always prioritize flexible operation over rigid procedures
+    if checklist_prior:
+        # Normalize existing checklists but keep them secondary to flexible operation
+        total_formal_mass = 0.3  # Only 30% weight to formal checklists
+        current_sum = sum(checklist_prior.values())
+        if current_sum > 0:
+            for name in checklist_prior:
+                checklist_prior[name] = (checklist_prior[name] / current_sum) * total_formal_mass
+    
+    # High probability of operating without rigid procedural constraints
+    checklist_prior['None'] = 0.7  # 70% chance of flexible, intent-driven operation
     
     return checklist_prior
 
+def classify_user_intent_llm(utterance: str, dialogue_acts: Dict[str, float], extraction: Dict) -> Dict[str, float]:
+    """Use LLM to understand user's underlying goals and intentions"""
+    
+    # Extract context for intent analysis
+    canonical_terms = extraction.get('canonical_terms', [])
+    entities = extraction.get('entities', [])
+    primary_dialogue_act = max(dialogue_acts.items(), key=lambda x: x[1])[0]
+    
+    analysis_prompt = f"""Analyze this user utterance to understand their underlying goals. Return valid JSON only:
+
+{{
+    "user_goals": {{
+        "identify": 0.0,
+        "recommend": 0.0,
+        "verify": 0.0,
+        "explore": 0.0,
+        "act": 0.0
+    }},
+    "primary_goal": "identify|recommend|verify|explore|act",
+    "reasoning": "brief explanation of intent analysis"
+}}
+
+Goal definitions:
+- identify: User wants to find/name a specific thing ("What movie is this?", "Who directed X?")
+- recommend: User wants suggestions/recommendations ("Suggest movies like X", "What should I watch?")
+- verify: User wants to confirm/check facts ("Is this true?", "Did X win an award?")
+- explore: User wants to learn/understand more ("Tell me about X", "How does Y work?")
+- act: User wants something done/executed ("Play this movie", "Add to watchlist")
+
+Context:
+- Utterance: "{utterance}"
+- Primary dialogue act: {primary_dialogue_act}
+- Key terms: {canonical_terms}
+- Entities mentioned: {[e.get('surface', '') for e in entities]}
+
+Guidelines:
+- Focus on what the user ultimately wants to accomplish
+- Consider specific language patterns (e.g., "like", "similar" → recommend)
+- Dialogue acts provide hints but goals are deeper intentions
+- Return probabilities that sum to 1.0
+
+JSON:"""
+    
+    try:
+        result = call_ollama_json(analysis_prompt)
+        user_goals = result.get('user_goals', {})
+        
+        # Validate and normalize probabilities
+        total = sum(user_goals.values())
+        if total > 0:
+            user_goals = {k: v/total for k, v in user_goals.items()}
+        else:
+            # Fallback based on dialogue act patterns
+            if primary_dialogue_act == 'request':
+                user_goals = {'identify': 0.4, 'recommend': 0.4, 'verify': 0.1, 'explore': 0.1, 'act': 0.0}
+            elif primary_dialogue_act == 'clarify':
+                user_goals = {'identify': 0.3, 'recommend': 0.1, 'verify': 0.2, 'explore': 0.4, 'act': 0.0}
+            else:
+                user_goals = {'identify': 0.4, 'recommend': 0.2, 'verify': 0.15, 'explore': 0.15, 'act': 0.1}
+        
+        return user_goals
+        
+    except Exception as e:
+        logger.error(f"User intent classification failed: {e}")
+        # Fallback to dialogue-act based heuristic
+        if primary_dialogue_act == 'request':
+            return {'identify': 0.4, 'recommend': 0.4, 'verify': 0.1, 'explore': 0.1, 'act': 0.0}
+        elif primary_dialogue_act == 'clarify':
+            return {'identify': 0.3, 'recommend': 0.1, 'verify': 0.2, 'explore': 0.4, 'act': 0.0}
+        else:
+            return {'identify': 0.4, 'recommend': 0.2, 'verify': 0.15, 'explore': 0.15, 'act': 0.1}
+
 def build_goal_prior(checklist_prior: Dict[str, float]) -> Dict[str, float]:
-    """Build prior over goals conditioned on checklist"""
+    """Build prior over goals using LLM-based intent understanding"""
+    # This function now serves as a bridge - the actual intent analysis happens 
+    # in the main decision flow where we have access to the utterance and context
     
-    # Standard dialogue goals
-    base_goals = {
-        'identify': 0.4,   # "What movie is this?"
-        'recommend': 0.2,  # "Suggest similar movies"
-        'verify': 0.15,    # "Is this fact correct?"
-        'explore': 0.15,   # "Tell me more about..."
-        'act': 0.1         # "Do something with this info"
-    }
-    
-    # Adjust based on active checklist (use top checklist for simplicity)
-    top_checklist = max(checklist_prior.items(), key=lambda x: x[1])[0]
-    
-    if 'Identify' in top_checklist:
-        base_goals['identify'] *= 1.5
-        base_goals['verify'] *= 0.8
-    elif 'Recommend' in top_checklist:
-        base_goals['recommend'] *= 1.8
-        base_goals['identify'] *= 0.7
-    elif 'Verify' in top_checklist:
-        base_goals['verify'] *= 1.6
-        base_goals['explore'] *= 1.2
-    
-    # Normalize
-    total = sum(base_goals.values())
-    return {k: v/total for k, v in base_goals.items()}
+    # For now, return a neutral prior that will be overridden by LLM analysis
+    return {'identify': 0.4, 'recommend': 0.2, 'verify': 0.15, 'explore': 0.15, 'act': 0.1}
 
 def build_subgraph_prior(candidates: List[Dict]) -> Dict[str, float]:
     """Build prior over candidate subgraphs using retrieval scores and simplicity"""
@@ -742,39 +1170,56 @@ def build_subgraph_prior(candidates: List[Dict]) -> Dict[str, float]:
     
     return subgraph_prior
 
+def classify_dialogue_act_llm(utterance: str) -> Dict[str, float]:
+    """Classify dialogue act using LLM understanding of conversational intent"""
+    
+    analysis_prompt = f"""Analyze this utterance and classify the dialogue act. Return valid JSON only:
+
+{{
+    "dialogue_acts": {{
+        "clarify": 0.0,
+        "confirm": 0.0, 
+        "request": 0.0,
+        "provide": 0.0
+    }},
+    "primary_act": "clarify|confirm|request|provide",
+    "reasoning": "brief explanation of classification"
+}}
+
+Dialogue acts defined:
+- clarify: Asking for information, seeking explanation (e.g., "What is X?", "How does Y work?")
+- confirm: Seeking verification of information (e.g., "Is this correct?", "Are you sure?")  
+- request: Asking for something to be done (e.g., "Find me X", "I want Y", "Help me with Z")
+- provide: Giving information or stating facts (e.g., "X is Y", "I think Z")
+
+Return probabilities that sum to 1.0 across the four dialogue acts.
+
+Utterance: "{utterance}"
+
+JSON:"""
+    
+    try:
+        result = call_ollama_json(analysis_prompt)
+        dialogue_acts = result.get('dialogue_acts', {})
+        
+        # Validate and normalize probabilities
+        total = sum(dialogue_acts.values())
+        if total > 0:
+            dialogue_acts = {k: v/total for k, v in dialogue_acts.items()}
+        else:
+            # Fallback to uniform distribution
+            dialogue_acts = {'clarify': 0.25, 'confirm': 0.25, 'request': 0.25, 'provide': 0.25}
+            
+        return dialogue_acts
+        
+    except Exception as e:
+        logger.error(f"Dialogue act classification failed: {e}")
+        # Fallback to uniform distribution
+        return {'clarify': 0.25, 'confirm': 0.25, 'request': 0.25, 'provide': 0.25}
+
 def build_dialogue_act_prior(utterance: str) -> Dict[str, float]:
-    """Build prior over dialogue acts based on utterance features"""
-    
-    utterance_lower = utterance.lower()
-    
-    # Simple heuristics based on utterance patterns
-    dialogue_prior = {
-        'clarify': 0.2,   # "What/which/how" questions
-        'confirm': 0.2,   # "Is this..." statements  
-        'request': 0.3,   # "I want/looking for" statements
-        'provide': 0.3    # Declarative information
-    }
-    
-    # Adjust based on patterns
-    if any(word in utterance_lower for word in ['what', 'which', 'who', 'when', 'where', 'how']):
-        dialogue_prior['clarify'] *= 1.5
-        dialogue_prior['request'] *= 1.2
-    
-    if any(word in utterance_lower for word in ['looking for', 'want', 'need', 'find']):
-        dialogue_prior['request'] *= 1.8
-        dialogue_prior['provide'] *= 0.7
-    
-    if any(word in utterance_lower for word in ['is this', 'is that', 'correct', 'true']):
-        dialogue_prior['confirm'] *= 1.6
-        dialogue_prior['clarify'] *= 1.2
-    
-    if '?' in utterance:
-        dialogue_prior['clarify'] *= 1.3
-        dialogue_prior['request'] *= 1.2
-    
-    # Normalize
-    total = sum(dialogue_prior.values())
-    return {k: v/total for k, v in dialogue_prior.items()}
+    """Build prior over dialogue acts using LLM-based classification"""
+    return classify_dialogue_act_llm(utterance)
 
 def build_novelty_prior(anchors: List[Dict], observation_u: Dict) -> float:
     """Build prior over novelty/OOD signals"""
@@ -813,21 +1258,25 @@ def build_novelty_prior(anchors: List[Dict], observation_u: Dict) -> float:
 # Build all priors
 print("Building priors over hidden states...")
 
-# Checklist prior
-checklist_prior = build_checklist_prior()
+# Dialogue act prior (compute first since checklist depends on it)
+dialogue_act_prior = build_dialogue_act_prior(TEST_UTTERANCE)
+print(f"Dialogue act prior: {dialogue_act_prior}")
+
+# Checklist prior (now uses dialogue acts and extracted terms)
+checklist_prior = build_checklist_prior(observation_u, dialogue_act_prior)
 print(f"Checklist prior: {checklist_prior}")
 
-# Goal prior
-goal_prior = build_goal_prior(checklist_prior)
-print(f"Goal prior: {goal_prior}")
+# Goal prior using LLM-based intent understanding
+goal_prior = classify_user_intent_llm(
+    utterance=TEST_UTTERANCE,
+    dialogue_acts=dialogue_act_prior, 
+    extraction=extraction_result
+)
+print(f"Goal prior (LLM-based): {goal_prior}")
 
 # Subgraph prior
 subgraph_prior = build_subgraph_prior(retrieval_context_R['candidates'])
 print(f"Subgraph prior (top 3): {dict(list(subgraph_prior.items())[:3])}")
-
-# Dialogue act prior
-dialogue_act_prior = build_dialogue_act_prior(TEST_UTTERANCE)
-print(f"Dialogue act prior: {dialogue_act_prior}")
 
 # Novelty prior
 novelty_prior = build_novelty_prior(retrieval_context_R['anchors'], observation_u)
@@ -863,7 +1312,7 @@ def compute_likelihood_per_candidate(candidate: Dict, observation_u: Dict, prior
         with driver.session(database=NEO4J_DATABASE) as session:
             top_checklist = max(priors.get('checklist', {"None": 1.0}).items(), key=lambda x: x[1])[0]
             cypher = """
-            MATCH (ss:SlotSpec:Demo {checklist_name: $cl}) WHERE ss.required = true
+            MATCH (ss:SlotSpec {checklist_name: $cl}) WHERE ss.required = true
             RETURN ss.name AS name, ss.expect_labels AS expect_labels
             """
             records = session.run(cypher, cl=top_checklist)
@@ -884,6 +1333,17 @@ def compute_likelihood_per_candidate(candidate: Dict, observation_u: Dict, prior
         hub_penalty = DEFAULTS['lambda_hub'] * (subgraph_size - DEFAULTS['d_cap'])
         penalties += hub_penalty
     
+    # Generic evidence bonus from SlotValues and Facts matching canonical terms
+    try:
+        canon_terms = list(observation_u.get('u_meta', {}).get('extraction', {}).get('canonical_terms', []))
+        if candidate.get('entity_id') and canon_terms:
+            ev = compute_generic_term_evidence(candidate['entity_id'], canon_terms)
+            # Convert [0,1] score to a small positive bonus; temperature controls impact
+            bonus = 0.6 * ev.get('term_evidence_score', 0.0)
+            channel_log_likelihood += bonus
+    except Exception:
+        pass
+
     # Total log-likelihood
     # Minor adjustment using observation_u terms overlap
     try:
@@ -970,27 +1430,14 @@ def update_posterior_checklist(observation_u: Dict, priors: Dict, top_subgraph_c
     return checklist_posterior
 
 def update_posterior_goal(observation_u: Dict, priors: Dict, dialogue_act_posterior: Dict) -> Dict[str, float]:
-    """Update goal posterior based on dialogue act and evidence"""
+    """Update goal posterior - simplified since LLM already does sophisticated intent analysis"""
     
+    # Since LLM-based goal priors already incorporate dialogue acts, entities, and context,
+    # we can trust them more and apply minimal adjustments
     goal_posterior = priors['goal'].copy()
     
-    # Adjust based on dialogue act
-    top_dialogue_act = max(dialogue_act_posterior.items(), key=lambda x: x[1])[0]
-    
-    if top_dialogue_act == 'request':
-        goal_posterior['identify'] *= 1.3
-        goal_posterior['recommend'] *= 1.1
-    elif top_dialogue_act == 'clarify':
-        goal_posterior['explore'] *= 1.4
-        goal_posterior['verify'] *= 1.2
-    elif top_dialogue_act == 'confirm':
-        goal_posterior['verify'] *= 1.5
-        goal_posterior['identify'] *= 1.1
-    
-    # Normalize
-    total = sum(goal_posterior.values())
-    if total > 0:
-        goal_posterior = {k: v/total for k, v in goal_posterior.items()}
+    # Optional: minor adjustments based on evidence strength (future enhancement)
+    # For now, trust the LLM analysis
     
     return goal_posterior
 
@@ -1000,11 +1447,21 @@ print("Updating posterior beliefs...")
 # Update subgraph posterior (main inference)
 posterior_subgraph = update_posterior_subgraph(retrieval_context_R['candidates'], priors, observation_u)
 
-# Get top candidate for conditioning other posteriors
-top_subgraph_id = max(posterior_subgraph.items(), key=lambda x: x[1])[0]
-top_candidate = next(c for c in retrieval_context_R['candidates'] if c['id'] == top_subgraph_id)
+if not posterior_subgraph:
+    logger.warning("No posterior candidates found; using first retrieval candidate if available.")
+    if retrieval_context_R['candidates']:
+        top_candidate = retrieval_context_R['candidates'][0]
+        top_subgraph_id = top_candidate['id']
+        posterior_subgraph = {top_subgraph_id: 1.0}
+    else:
+        raise RuntimeError("No candidates available for posterior update.")
+else:
+    # Get top candidate for conditioning other posteriors
+    top_subgraph_id = max(posterior_subgraph.items(), key=lambda x: x[1])[0]
+    top_candidate = next(c for c in retrieval_context_R['candidates'] if c['id'] == top_subgraph_id)
 
-print(f"Top subgraph: {top_candidate['anchor_name']} (probability: {posterior_subgraph[top_subgraph_id]:.3f})")
+shown_name = top_candidate.get('entity_name') or top_candidate.get('anchor_name')
+print(f"Top candidate: {shown_name} (probability: {posterior_subgraph[top_subgraph_id]:.3f})")
 
 # Update other posteriors
 posterior_checklist = update_posterior_checklist(observation_u, priors, top_candidate)
@@ -1071,7 +1528,7 @@ def analyze_slot_uncertainty(top_candidate: Dict, checklist_name: str) -> Dict[s
     try:
         with driver.session(database=NEO4J_DATABASE) as session:
             cypher = """
-            MATCH (ss:SlotSpec:Demo {checklist_name: $cl})
+            MATCH (ss:SlotSpec {checklist_name: $cl})
             RETURN ss.name AS name, ss.required AS required, ss.expect_labels AS expect_labels, ss.cardinality AS cardinality
             ORDER BY ss.name
             """
@@ -1105,29 +1562,92 @@ def analyze_slot_uncertainty(top_candidate: Dict, checklist_name: str) -> Dict[s
     
     return slot_analysis
 
-def calculate_eig_ask(slot_analysis: Dict) -> Dict[str, float]:
-    """Calculate Expected Information Gain for asking about each slot"""
+def assess_slot_information_value_llm(slot: str, slot_info: Dict, candidate: Dict, query_context: Dict) -> float:
+    """Use LLM to assess the information value of asking about a specific slot"""
+    
+    # Extract candidate evidence details
+    distances = candidate.get('distances', {})
+    semantic_distance = distances.get('delta_sem', 1.0)
+    structural_distance = distances.get('delta_struct', 1.0)
+    terms_distance = distances.get('delta_terms', 1.0)
+    
+    analysis_prompt = f"""Assess the information value of asking about this slot. Return valid JSON only:
+
+{{
+    "information_value": 0.0,
+    "priority": "high|medium|low",
+    "reasoning": "brief explanation of assessment"
+}}
+
+Slot Analysis:
+- Slot: {slot}
+- Current entropy: {slot_info['entropy']:.2f} bits
+- Current confidence: {slot_info['confidence']:.3f}
+- Evidence quality: {slot_info['evidence']}
+- Required for decision: {slot_info.get('required', False)}
+
+Candidate Evidence:
+- Semantic distance: {semantic_distance:.3f} (lower = better match)
+- Structural distance: {structural_distance:.3f} (lower = better match) 
+- Terms distance: {terms_distance:.3f} (lower = better match)
+- Connected entities: {len(candidate.get('connected_ids', []))}
+
+Query Context:
+- Query type: {query_context.get('type', 'general')}
+- Domain: {query_context.get('domain', 'general')}
+- User goal: {query_context.get('goal', 'identify')}
+
+Assessment Guidelines:
+- information_value: Expected bits of information gained (0.0-3.0 range)
+- High entropy + low confidence = high potential gain
+- Missing evidence in critical slots = very high value
+- Strong existing evidence = lower marginal value
+- Consider whether this slot is essential for the user's goal
+
+JSON:"""
+    
+    try:
+        result = call_ollama_json(analysis_prompt)
+        
+        info_value = float(result.get('information_value', 0.0))
+        # Clamp to reasonable range
+        info_value = max(0.0, min(3.0, info_value))
+        
+        return info_value
+        
+    except Exception as e:
+        logger.error(f"Slot information value assessment failed: {e}")
+        
+        # Intelligent fallback based on information theory
+        base_eig = slot_info['entropy']
+        confidence_factor = 1.0 - slot_info['confidence']
+        
+        # Smart evidence factor based on evidence type
+        evidence_factor_map = {
+            'missing': 1.3,      # High value - we need this info
+            'weak': 1.1,         # Moderate value - could be helpful
+            'structural': 0.9,   # Lower value - we have some structural evidence
+            'strong': 0.4        # Low value - we already have good evidence
+        }
+        evidence_factor = evidence_factor_map.get(slot_info['evidence'], 1.0)
+        
+        return base_eig * confidence_factor * evidence_factor
+
+def calculate_eig_ask(slot_analysis: Dict, candidate: Dict = None, query_context: Dict = None) -> Dict[str, float]:
+    """Calculate Expected Information Gain for asking about each slot using LLM assessment"""
     
     eig_ask = {}
     
+    # Default context if not provided
+    if candidate is None:
+        candidate = {}
+    if query_context is None:
+        query_context = {'type': 'general', 'domain': 'film', 'goal': 'identify'}
+    
     for slot, info in slot_analysis.items():
-        # Simple EIG approximation: higher entropy = higher potential gain
-        base_eig = info['entropy']
-        
-        # Adjust for current confidence (lower confidence = higher gain potential)
-        confidence_factor = 1.0 - info['confidence']
-        
-        # Adjust for evidence quality
-        evidence_factor = {
-            'missing': 1.2,
-            'weak': 1.0,
-            'structural': 0.8,
-            'strong': 0.3
-        }.get(info['evidence'], 1.0)
-        
-        # Combined EIG estimate
-        eig = base_eig * confidence_factor * evidence_factor
-        eig_ask[slot] = eig
+        # Use LLM to assess information value
+        eig_value = assess_slot_information_value_llm(slot, info, candidate, query_context)
+        eig_ask[slot] = eig_value
     
     return eig_ask
 
@@ -1146,65 +1666,351 @@ def calculate_eig_search() -> float:
     
     return base_search_eig
 
+def predict_user_responses_llm(question: str, context: Dict) -> List[Tuple[str, float]]:
+    """Use LLM to predict how users would likely respond to a specific question"""
+    
+    # Extract context information
+    domain = context.get('domain', 'general')
+    user_knowledge = context.get('user_knowledge', 'moderate')
+    conversation_state = context.get('conversation_state', 'initial')
+    
+    analysis_prompt = f"""Predict how users would likely respond to this question. Return valid JSON only:
+
+{{
+    "response_probabilities": [
+        {{"type": "specific_value", "probability": 0.0, "example": "example response"}},
+        {{"type": "range_value", "probability": 0.0, "example": "example response"}},
+        {{"type": "approximate", "probability": 0.0, "example": "example response"}},
+        {{"type": "additional_clues", "probability": 0.0, "example": "example response"}},
+        {{"type": "redirect_question", "probability": 0.0, "example": "example response"}},
+        {{"type": "dont_know", "probability": 0.0, "example": "example response"}},
+        {{"type": "clarify_question", "probability": 0.0, "example": "example response"}}
+    ],
+    "reasoning": "brief explanation of prediction"
+}}
+
+Response types defined:
+- specific_value: User gives exact, definitive answer (e.g., "1995", "Heat", "Michael Mann")
+- range_value: User gives range or category (e.g., "mid-90s", "action movie", "around 2 hours")
+- approximate: User gives approximate/uncertain answer (e.g., "I think it was...", "probably...")
+- additional_clues: User provides related information instead (e.g., "It had Tom Cruise", "It was about a heist")
+- redirect_question: User asks back or changes topic (e.g., "Why do you ask?", "What about X instead?")
+- dont_know: User admits they don't know (e.g., "I don't know", "Not sure", "No idea")
+- clarify_question: User asks for clarification (e.g., "Which film?", "What do you mean?")
+
+Context:
+- Domain: {domain}
+- User knowledge level: {user_knowledge}
+- Conversation state: {conversation_state}
+
+Question: "{question}"
+
+Return probabilities that sum to 1.0.
+
+JSON:"""
+    
+    try:
+        result = call_ollama_json(analysis_prompt)
+        response_probs = result.get('response_probabilities', [])
+        
+        # Convert to the expected format and normalize
+        responses = []
+        total_prob = 0.0
+        
+        for resp in response_probs:
+            prob = float(resp.get('probability', 0.0))
+            resp_type = resp.get('type', 'unknown')
+            responses.append((resp_type, prob))
+            total_prob += prob
+        
+        # Normalize probabilities
+        if total_prob > 0:
+            responses = [(resp_type, prob/total_prob) for resp_type, prob in responses]
+        else:
+            # Fallback to uniform distribution
+            n = len(responses) if responses else 7
+            default_prob = 1.0 / n
+            responses = [("specific_value", default_prob), ("approximate", default_prob), 
+                        ("dont_know", default_prob), ("additional_clues", default_prob),
+                        ("range_value", default_prob), ("redirect_question", default_prob),
+                        ("clarify_question", default_prob)]
+        
+        return responses
+
+    except Exception as e:
+        logger.error(f"User response prediction failed: {e}")
+        # Fallback to simple heuristic
+        return [("specific_value", 0.4), ("approximate", 0.3), ("dont_know", 0.2), ("additional_clues", 0.1)]
+
 def simulate_user_responses(target_slot: str, posteriors: Dict) -> List[Tuple[str, float]]:
-    """Simulate possible user responses to asking about a slot"""
+    """Simulate possible user responses using LLM-based prediction"""
     
-    responses = []
+    # Generate an appropriate question for this slot
+    question = f"Could you tell me about the {target_slot}?"
     
-    # Generic response profiles by slot "kind" inferred from name
-    slot_lower = target_slot.lower()
-    if any(k in slot_lower for k in ['year', 'date', 'time']):
-        responses = [("specific_value", 0.5), ("range", 0.3), ("approximate", 0.15), ("unknown", 0.05)]
-    elif any(k in slot_lower for k in ['id', 'name', 'title']):
-        responses = [("specific_value", 0.7), ("additional_clues", 0.2), ("unknown", 0.1)]
-    else:
-        responses = [("informative", 0.6), ("partial", 0.3), ("unknown", 0.1)]
+    # Build context for prediction
+    context = {
+        'domain': 'movies',  # Could be extracted from the graph/checklist
+        'user_knowledge': 'moderate',  # Could be inferred from previous interactions
+        'conversation_state': 'clarification'  # Current state of conversation
+    }
     
-    return responses
+    return predict_user_responses_llm(question, context)
+
+def assess_information_gain_llm(response_type: str, target_slot: str, posteriors: Dict, question_context: Dict) -> Dict[str, float]:
+    """Use LLM to intelligently assess both immediate and follow-up information gain"""
+    
+    # Calculate current state metrics
+    current_entropy = -sum(p * np.log2(p) for p in posteriors['subgraph'].values() if p > 1e-10)
+    num_candidates = len(posteriors['subgraph'])
+    top_prob = max(posteriors['subgraph'].values())
+    
+    # Extract context about the question and domain
+    question_target = question_context.get('target', target_slot)
+    question_type = question_context.get('type', 'clarification')
+    domain = question_context.get('domain', 'general')
+    
+    analysis_prompt = f"""Analyze the expected information gain from this user response type. Return valid JSON only:
+
+{{
+    "immediate_entropy_reduction": 0.0,
+    "followup_information_potential": 0.0,
+    "reasoning": "brief explanation of information theory assessment"
+}}
+
+Current Uncertainty State:
+- Total candidates: {num_candidates}
+- Current entropy: {current_entropy:.2f} bits
+- Top candidate probability: {top_prob:.3f}
+- Uncertainty level: {"high" if current_entropy > 2.5 else "moderate" if current_entropy > 1.5 else "low"}
+
+Question Context:
+- Target information: {question_target}
+- Question type: {question_type}
+- Domain: {domain}
+
+User Response Type: {response_type}
+
+Response Type Meanings:
+- specific_value: User provides exact, definitive answer
+- range_value: User provides range/category (e.g., "1990s", "action genre")
+- approximate: User provides rough/uncertain answer
+- additional_clues: User offers related but different information
+- redirect_question: User asks counter-question or changes topic
+- dont_know: User explicitly states lack of knowledge
+- clarify_question: User asks for clarification of our question
+
+Assessment Guidelines:
+- immediate_entropy_reduction: How much uncertainty (0.0-1.0 fraction) this response would eliminate
+- followup_information_potential: Expected information gain (0.0-1.0) from best follow-up action
+- Consider domain characteristics (films have many attributes, facts are binary)
+- Higher entropy states have more potential for large reductions
+- Specific values in high-uncertainty contexts are extremely valuable
+- "Don't know" responses may redirect strategy (SEARCH vs ASK)
+
+JSON:"""
+    
+    try:
+        result = call_ollama_json(analysis_prompt)
+        
+        immediate_reduction = float(result.get('immediate_entropy_reduction', 0.0))
+        followup_potential = float(result.get('followup_information_potential', 0.0))
+        reasoning = result.get('reasoning', 'LLM analysis completed')
+        
+        # Validate ranges
+        immediate_reduction = max(0.0, min(1.0, immediate_reduction))
+        followup_potential = max(0.0, min(1.0, followup_potential))
+        
+        return {
+            'immediate_reduction': immediate_reduction,
+            'followup_potential': followup_potential,
+            'reasoning': reasoning
+        }
+        
+    except Exception as e:
+        logger.error(f"Information gain assessment failed: {e}")
+        
+        # Intelligent fallback based on response type patterns
+        fallback_map = {
+            "specific_value": {'immediate': 0.8, 'followup': 0.1},
+            "range_value": {'immediate': 0.5, 'followup': 0.4}, 
+            "approximate": {'immediate': 0.3, 'followup': 0.5},
+            "additional_clues": {'immediate': 0.4, 'followup': 0.7},
+            "redirect_question": {'immediate': 0.1, 'followup': 0.3},
+            "dont_know": {'immediate': 0.0, 'followup': 0.6},
+            "clarify_question": {'immediate': 0.2, 'followup': 0.4}
+        }
+        
+        fallback = fallback_map.get(response_type, {'immediate': 0.3, 'followup': 0.4})
+        return {
+            'immediate_reduction': fallback['immediate'],
+            'followup_potential': fallback['followup'],
+            'reasoning': f'LLM failed, using fallback for {response_type}'
+        }
 
 def estimate_entropy_reduction(response_type: str, target_slot: str, posteriors: Dict) -> float:
-    """Estimate how much entropy would be reduced by a given response"""
+    """Estimate immediate entropy reduction using LLM-based analysis"""
     
+    question_context = {
+        'target': target_slot,
+        'type': 'clarification',
+        'domain': 'film'  # Default to film domain for this system
+    }
+    
+    assessment = assess_information_gain_llm(response_type, target_slot, posteriors, question_context)
     current_entropy = -sum(p * np.log2(p) for p in posteriors['subgraph'].values() if p > 1e-10)
     
-    # Estimate entropy reduction based on response informativeness
-    if response_type in ("specific_value", "confirm_current"):
-        # Very informative - should collapse to one candidate
-        reduction = current_entropy * 0.8
-    elif response_type in ("range", "specific_year", "informative"):
-        # Moderately informative - eliminates some candidates
-        reduction = current_entropy * 0.5
-    elif response_type in ("decade", "approximate", "partial"):
-        # Somewhat informative - narrows down options
-        reduction = current_entropy * 0.3
-    elif response_type == "provide_different":
-        # Changes the game - new candidates but resolves uncertainty
-        reduction = current_entropy * 0.6
-    else:  # unknown, approximate
-        # Low information - small reduction
-        reduction = current_entropy * 0.1
-    
-    return reduction
+    return current_entropy * assessment['immediate_reduction']
 
 def estimate_followup_eig(response_type: str, target_slot: str, posteriors: Dict) -> float:
-    """Estimate EIG of best follow-up action after user response"""
+    """Estimate follow-up information gain using LLM-based analysis"""
     
-    # After user response, what would be the best next action's EIG?
-    if response_type in ["specific_value", "confirm_current"]:
-        # User gave definitive answer - next action likely ANSWER with high confidence
-        return 0.1  # Low EIG because we're nearly done
-    elif response_type in ["specific_year", "informative", "range"]:
-        # Good info but may need one more clarification
-        return 0.4  # Moderate EIG for final disambiguation
-    elif response_type == "provide_different":
-        # New actor mentioned - need to search/ask about their films
-        return 0.7  # High EIG for exploring new branch
-    elif response_type in ["decade", "partial"]:
-        # Partial info - likely need another targeted question
-        return 0.5  # Moderate EIG for follow-up question
-    else:  # unknown
-        # User doesn't know - may need to switch to SEARCH
-        return 0.6  # Search becomes more valuable
+    question_context = {
+        'target': target_slot,
+        'type': 'clarification', 
+        'domain': 'film'  # Default to film domain for this system
+    }
+    
+    assessment = assess_information_gain_llm(response_type, target_slot, posteriors, question_context)
+    
+    # Scale follow-up potential by baseline EIG (assume moderate baseline of 1.0 bits)
+    baseline_eig = 1.0
+    return baseline_eig * assessment['followup_potential']
+
+def assess_evidence_quality_factors_llm(candidate: Dict) -> Dict[str, Any]:
+    """Use LLM to assess evidence quality factors instead of hard-coded thresholds"""
+    
+    distances = candidate.get('distances', {})
+    semantic_distance = distances.get('delta_sem', 1.0)
+    structural_distance = distances.get('delta_struct', 1.0) 
+    terms_distance = distances.get('delta_terms', 1.0)
+    connected_entities = len(candidate.get('connected_ids', []))
+    
+    analysis_prompt = f"""Analyze evidence quality for this candidate. Return valid JSON only:
+
+{{
+    "semantic_match": "strong|moderate|weak",
+    "structural_match": "strong|moderate|weak", 
+    "term_match": "strong|moderate|weak",
+    "overall_evidence": "strong|moderate|weak|insufficient",
+    "reasoning": "brief explanation of evidence assessment"
+}}
+
+Evidence Metrics:
+- Semantic distance: {semantic_distance:.3f} (0.0 = perfect match, 1.0 = no match)
+- Structural distance: {structural_distance:.3f} (0.0 = perfect match, 1.0 = no match)
+- Terms distance: {terms_distance:.3f} (0.0 = perfect match, 1.0 = no match)
+- Connected entities: {connected_entities}
+
+Assessment Guidelines:
+- Semantic distances < 0.3 are typically strong matches
+- Structural distances < 0.2 indicate good structural alignment  
+- Terms distances < 0.4 suggest good terminology overlap
+- More connected entities generally indicate richer context
+- Consider the combination of all factors for overall assessment
+
+JSON:"""
+    
+    try:
+        result = call_ollama_json(analysis_prompt)
+        
+        # Convert qualitative assessments to boolean for compatibility
+        quality_map = {'strong': True, 'moderate': True, 'weak': False, 'insufficient': False}
+        
+        return {
+            'semantic_match': quality_map.get(result.get('semantic_match', 'weak'), False),
+            'structural_match': quality_map.get(result.get('structural_match', 'weak'), False),
+            'term_match': quality_map.get(result.get('term_match', 'weak'), False),
+            'has_entities': connected_entities > 0,
+            'overall_quality': result.get('overall_evidence', 'weak'),
+            'reasoning': result.get('reasoning', 'Evidence quality assessment completed')
+        }
+        
+    except Exception as e:
+        logger.error(f"Evidence quality factors assessment failed: {e}")
+        
+        # Intelligent fallback using reasonable thresholds
+        return {
+            'semantic_match': semantic_distance < 0.4,
+            'structural_match': structural_distance < 0.3,
+            'term_match': terms_distance < 0.5,
+            'has_entities': connected_entities > 0,
+            'overall_quality': 'moderate' if (semantic_distance < 0.5 and structural_distance < 0.4) else 'weak',
+            'reasoning': 'LLM assessment failed, using fallback thresholds'
+        }
+
+def assess_evidence_quality_llm(top_candidate: Dict, posteriors: Dict, entropies: Dict, margin: float) -> Dict[str, Any]:
+    """Use LLM to assess if current evidence is sufficient for making a decision"""
+    
+    # Extract evidence summary
+    top_prob = max(posteriors['subgraph'].values())
+    second_prob = sorted(posteriors['subgraph'].values(), reverse=True)[1] if len(posteriors['subgraph']) > 1 else 0.0
+    
+    # Build evidence summary for LLM
+    evidence_summary = {
+        'top_candidate_name': top_candidate.get('entity_name') or top_candidate.get('anchor_name'),
+        'top_probability': float(top_prob),
+        'second_probability': float(second_prob),
+        'margin': float(margin),
+        'subgraph_entropy': float(entropies.get('subgraph', 0.0)),
+        'evidence_types': assess_evidence_quality_factors_llm(top_candidate),
+        'candidate_count': len(posteriors['subgraph'])
+    }
+    
+    analysis_prompt = f"""Assess whether we have sufficient evidence to give a confident answer. Return valid JSON only:
+
+{{
+    "decision_ready": true/false,
+    "confidence_sufficient": true/false,
+    "margin_sufficient": true/false,
+    "recommended_action": "answer|ask|search",
+    "reasoning": "brief explanation of assessment"
+}}
+
+Evidence Assessment:
+- Top candidate: {evidence_summary['top_candidate_name']}
+- Top probability: {evidence_summary['top_probability']:.3f}
+- Second probability: {evidence_summary['second_probability']:.3f}
+- Margin between top 2: {evidence_summary['margin']:.3f}
+- Total candidates: {evidence_summary['candidate_count']}
+- Uncertainty (entropy): {evidence_summary['subgraph_entropy']:.3f}
+
+Evidence Quality:
+- Semantic match: {'Strong' if evidence_summary['evidence_types']['semantic_match'] else 'Weak'}
+- Structural match: {'Strong' if evidence_summary['evidence_types']['structural_match'] else 'Weak'}
+- Term match: {'Strong' if evidence_summary['evidence_types']['term_match'] else 'Weak'}
+- Overall quality: {evidence_summary['evidence_types'].get('overall_quality', 'unknown')}
+- Connected entities: {len(top_candidate.get('connected_ids', []))}
+
+Guidelines:
+- decision_ready: true if evidence strongly points to one answer
+- confidence_sufficient: true if top probability indicates strong evidence
+- margin_sufficient: true if there's clear separation between top candidates
+- Consider both the strength of evidence AND the clarity of the winner
+
+JSON:"""
+    
+    try:
+        result = call_ollama_json(analysis_prompt)
+        return {
+            'decision_ready': result.get('decision_ready', False),
+            'confidence_sufficient': result.get('confidence_sufficient', False), 
+            'margin_sufficient': result.get('margin_sufficient', False),
+            'recommended_action': result.get('recommended_action', 'ask'),
+            'reasoning': result.get('reasoning', 'Evidence assessment failed'),
+            'evidence_summary': evidence_summary
+        }
+    except Exception as e:
+        logger.error(f"Evidence quality assessment failed: {e}")
+        # Fallback to conservative thresholds
+        return {
+            'decision_ready': top_prob >= 0.70 and margin >= 0.20,
+            'confidence_sufficient': top_prob >= 0.70,
+            'margin_sufficient': margin >= 0.20, 
+            'recommended_action': 'answer' if (top_prob >= 0.70 and margin >= 0.20) else 'ask',
+            'reasoning': 'LLM assessment failed, using fallback thresholds',
+            'evidence_summary': evidence_summary
+        }
 
 def calculate_eig_lookahead(target_slot: str, posteriors: Dict) -> float:
     """Calculate 2-step lookahead EIG: immediate + expected follow-up value"""
@@ -1230,22 +2036,95 @@ def calculate_eig_lookahead(target_slot: str, posteriors: Dict) -> float:
     
     return total_eig
 
-def make_decision(posteriors: Dict, entropies: Dict, top_candidate: Dict, margin: float) -> Dict[str, Any]:
+def make_decision(posteriors: Dict, entropies: Dict, top_candidate: Dict, margin: float, observation_u: Dict, retrieval_context_R: Dict) -> Dict[str, Any]:
     """Decide between ANSWER, ASK, or SEARCH based on uncertainty and lookahead EIG"""
     
-    # Decision thresholds
-    ANSWER_CONFIDENCE_THRESHOLD = 0.70
-    ANSWER_MARGIN_THRESHOLD = 0.20
-    MAX_ENTROPY_THRESHOLD = 0.5
+    # LLM-BASED FAST PATH: Use the LLM's query analysis for immediate clarification
+    extraction = observation_u.get('u_meta', {}).get('extraction', {})
+    query_analysis = extraction.get('query_analysis', {})
+    
+    # Check if LLM determined immediate clarification is needed
+    if query_analysis.get('immediate_clarification_needed', False):
+        clarity = query_analysis.get('clarity', 'vague')
+        clarification_type = query_analysis.get('clarification_type', 'task_domain')
+        
+        # Generate appropriate clarification based on LLM analysis
+        clarification_responses = {
+            'task_domain': "I'd be happy to help! Could you tell me what specific task you need assistance with?",
+            'intent': "I'm having trouble understanding what you need. Could you provide more details about what you're trying to accomplish?",
+            'specifics': "Could you give me more specific details about what you're looking for?"
+        }
+        
+        quick_response = clarification_responses.get(clarification_type, 
+                                                   "Could you provide more information about what you need?")
+        
+        # Bypass heavy computation when LLM identifies need for immediate clarification
+        return {
+            'action': 'ASK',
+            'confidence': 0.0,  # We know nothing about the actual task
+            'margin': 0.0,
+            'reasoning': f'LLM analysis: {clarity} query needs {clarification_type} clarification',
+            'target': clarification_type,
+            'quick_response': quick_response,
+            'llm_analysis': query_analysis,
+            'eig_scores': {
+                'ask_immediate': {clarification_type: float('inf')},  # Infinite value for LLM-identified necessity
+                'ask_lookahead': {clarification_type: float('inf')},
+                'search': 0.0  # No point searching when LLM says we need clarification first
+            }
+        }
+    
+    # LLM-based evidence assessment will replace hard-coded thresholds
     
     top_prob = max(posteriors['subgraph'].values())
     
     # Get active checklist
     top_checklist = max(posteriors['checklist'].items(), key=lambda x: x[1])[0]
     
-    # Analyze slots
+    # EARLY ROUTING: Intent-based routing for recommendations (independent of formal checklists)
+    
+    # Extract intent signals directly from user observation
+    canonical_terms = observation_u.get('u_meta', {}).get('extraction', {}).get('canonical_terms', [])
+    has_recommend_term = any('recommend' in term.lower() for term in canonical_terms)
+    has_similar_pattern = any(word in ' '.join(canonical_terms).lower() for word in ['similar', 'like', 'comparable'])
+    
+    # Check if this looks like a recommendation request regardless of checklist
+    is_recommendation_intent = (
+        has_recommend_term or 
+        has_similar_pattern or
+        'Recommend' in top_checklist
+    )
+    
+    if (is_recommendation_intent and 
+        retrieval_context_R.get('linked_entity_ids') and 
+        top_prob < 0.95):  # Not already supremely confident in answer
+        
+        linked_entity = retrieval_context_R.get('linked_entity_ids')[0]
+        logger.info(f"Early routing: Recommendation intent detected with linked entity {linked_entity}")
+        return {
+            'action': 'SEARCH',
+            'confidence': top_prob,
+            'margin': margin,
+            'reasoning': f"Recommendation intent with known entity ({linked_entity}) - searching for similar items",
+            'target': 'similar_items',
+            'eig_scores': {
+                'ask_immediate': {},
+                'ask_lookahead': {},
+                'search': 1.0  # High EIG for recommendation search
+            }
+        }
+    
+    # Analyze slots for non-recommendation tasks or when entity linking failed
     slot_analysis = analyze_slot_uncertainty(top_candidate, top_checklist)
-    eig_ask_immediate = calculate_eig_ask(slot_analysis)
+    
+    # Build query context for LLM assessment
+    query_context = {
+        'type': 'clarification',
+        'domain': 'film',  # Default to film domain for this system
+        'goal': max(posteriors['goal'].items(), key=lambda x: x[1])[0] if 'goal' in posteriors else 'identify'
+    }
+    
+    eig_ask_immediate = calculate_eig_ask(slot_analysis, top_candidate, query_context)
     eig_search = calculate_eig_search()
     
     # Calculate lookahead EIG for each slot (EIG_2)
@@ -1267,17 +2146,15 @@ def make_decision(posteriors: Dict, entropies: Dict, top_candidate: Dict, margin
         }
     }
     
-    # Check if we should ANSWER
-    all_slot_entropies = [info['entropy'] for info in slot_analysis.values()]
-    max_slot_entropy = max(all_slot_entropies) if all_slot_entropies else 0
+    # Use LLM to assess evidence quality instead of hard-coded thresholds
+    evidence_assessment = assess_evidence_quality_llm(top_candidate, posteriors, entropies, margin)
     
-    if (top_prob >= ANSWER_CONFIDENCE_THRESHOLD and 
-        margin >= ANSWER_MARGIN_THRESHOLD and 
-        max_slot_entropy < MAX_ENTROPY_THRESHOLD):
-        
+    # Check if we should ANSWER based on LLM assessment
+    if evidence_assessment['decision_ready']:
         decision['action'] = 'ANSWER'
-        decision['target'] = top_candidate['anchor_name']
-        decision['reasoning'] = f"High confidence ({top_prob:.3f}) and low uncertainty"
+        decision['target'] = top_candidate.get('entity_name') or top_candidate['anchor_name']
+        decision['reasoning'] = f"LLM assessment: {evidence_assessment['reasoning']}"
+        decision['evidence_assessment'] = evidence_assessment
     
     else:
         # Choose between ASK and SEARCH using lookahead EIG
@@ -1297,11 +2174,14 @@ def make_decision(posteriors: Dict, entropies: Dict, top_candidate: Dict, margin
         if best_ask_eig > eig_search and best_ask_slot:
             decision['action'] = 'ASK'
             decision['target'] = best_ask_slot
-            decision['reasoning'] = f"Asking about '{best_ask_slot}' has highest lookahead EIG ({best_ask_eig:.3f}, immediate: {immediate_eig:.3f})"
+            decision['reasoning'] = f"LLM assessment: insufficient evidence. Asking about '{best_ask_slot}' has highest lookahead EIG ({best_ask_eig:.3f})"
         else:
             decision['action'] = 'SEARCH'
             decision['target'] = 'missing_facts'
-            decision['reasoning'] = f"Search has higher EIG ({eig_search:.3f}) than asking"
+            decision['reasoning'] = f"LLM assessment: insufficient evidence. Search has higher EIG ({eig_search:.3f}) than asking"
+        
+        # Include evidence assessment in decision for transparency
+        decision['evidence_assessment'] = evidence_assessment
     
     return decision
 
@@ -1313,7 +2193,7 @@ entropies = calculate_entropies(posteriors)
 print(f"Entropies: {entropies}")
 
 # Make decision
-decision = make_decision(posteriors, entropies, top_candidate, margin)
+decision = make_decision(posteriors, entropies, top_candidate, margin, observation_u, retrieval_context_R)
 
 print(f"\nDECISION: {decision['action']}")
 print(f"Target: {decision['target']}")
@@ -1349,30 +2229,50 @@ def generate_question_llm(decision: Dict, system_state: Dict) -> str:
         return f"Action: {decision['action']} (target: {decision['target']})"
     
     target_slot = decision['target']
+    
+    # Handle LLM-based clarification (intelligent instant response)
+    if 'quick_response' in decision:
+        return decision['quick_response']
+    
     top_candidate = system_state['top_candidate']
     
-    # Build context for question generation (domain-agnostic)
+    # Get active checklist to determine question context
+    active_checklist = max(system_state.get('posteriors', {}).get('checklist', {"None": 1.0}).items(), key=lambda x: x[1])[0]
+    
+    # Build context for question generation based on task type
+    if 'Recommend' in active_checklist:
+        # For recommendation tasks, ask about preferences rather than identification
+        task_context = "recommend similar items"
+        reasoning = f"Need to understand user preferences for {target_slot} to improve recommendations"
+        fallback_template = f"What {target_slot} preference do you have for recommendations?"
+    else:
+        # For identification tasks, ask about target characteristics  
+        task_context = "identify the target"
+        reasoning = f"Need to disambiguate {target_slot} to improve identification"
+        fallback_template = f"Could you share the {target_slot} you're thinking of?"
+    
     context = {
-        "checklist": system_state.get('active_checklist', max(system_state.get('priors', {}).get('checklist', {"None":1.0}).items(), key=lambda x: x[1])[0]),
+        "checklist": active_checklist,
+        "task_context": task_context,
         "slot": target_slot,
         "top_candidate": {
             "anchor": top_candidate['anchor_name'],
             "connected": top_candidate.get('connected_names', [])[:3]
         },
         "confidence": decision['confidence'],
-        "reasoning": f"Need to disambiguate {target_slot} to improve identification"
+        "reasoning": reasoning
     }
     
     # Create prompt for question generation
     prompt = f"""Generate a natural, conversational question to ask the user. Context:
 
-- Task: {context['checklist']} 
+- Task: {context['task_context']} 
 - Need to ask about: {context['slot']}
-- Top candidate: {context['top_candidate']['anchor']}
+- Current focus: {context['top_candidate']['anchor']}
 - Confidence: {context['confidence']:.1%}
 - Why: {context['reasoning']}
 
-Generate ONE short, natural question that would help reduce uncertainty for the target. Be conversational and helpful.
+Generate ONE short, natural question that would help reduce uncertainty. Be conversational and helpful.
 
 Question:"""
     
@@ -1383,8 +2283,8 @@ Question:"""
     except Exception as e:
         logger.error(f"Question generation failed: {e}")
     
-    # Fallback to template-based question (generic)
-    return f"Could you share the {target_slot} you're thinking of?"
+    # Fallback to context-appropriate template
+    return fallback_template
 
 def generate_answer(decision: Dict, system_state: Dict) -> str:
     """Generate an answer when confidence is high enough"""
@@ -1480,7 +2380,8 @@ def demonstrate_full_system():
     # 7. Posterior Updates
     print("7. POSTERIOR UPDATES")
     print("-" * 30)
-    print(f"Top subgraph: {top_candidate['anchor_name']} (probability: {posteriors['subgraph'][top_subgraph_id]:.3f})")
+    shown_name = top_candidate.get('entity_name') or top_candidate.get('anchor_name')
+    print(f"Top candidate: {shown_name} (probability: {posteriors['subgraph'][top_subgraph_id]:.3f})")
     print(f"Checklist posterior: {posteriors['checklist']}")
     print(f"Goal posterior: {dict(list(posteriors['goal'].items())[:3])}")
     print(f"Subgraph posterior (top 3): {dict(list(posteriors['subgraph'].items())[:3])}")

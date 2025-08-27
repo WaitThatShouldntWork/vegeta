@@ -1,6 +1,6 @@
-MATCH (n:Demo) DETACH DELETE n;
+MATCH (n) DETACH DELETE n;
 
-// --- Constraints (EMG-aligned, demo-scoped) ---
+// --- Constraints ---
 CREATE CONSTRAINT IF NOT EXISTS
 FOR (e:Entity) REQUIRE e.id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS
@@ -52,13 +52,13 @@ WITH tFilm, tYear,
   {id:'film:true_lies',              name:'True Lies',                       year:1994, genres:['Action','Comedy'],     aliases:[],             plot:'A secret agent’s double life collides with a terrorist plot.'}
 ] AS films
 UNWIND films AS f
-MERGE (film:Entity:Film:Demo {id: f.id})
+MERGE (film:Entity:Film {id: f.id})
 SET film.name = f.name,
     film.title = f.name,
     film.plot  = f.plot,
     film.aliases = f.aliases
 MERGE (film)-[:INSTANCE_OF]->(tFilm)
-MERGE (y:Entity:Year:Demo {id: 'year:' + toString(f.year), value: f.year})
+MERGE (y:Entity:Year {id: 'year:' + toString(f.year), value: f.year})
 MERGE (y)-[:INSTANCE_OF]->(tYear)
 MERGE (film)-[:RELEASE_YEAR]->(y)
 WITH f, film
@@ -66,10 +66,10 @@ UNWIND f.genres AS gname
 MERGE (svg:SlotValue {slot:'Genre', value:gname})
 MERGE (film)-[:HAS_SLOT]->(svg);
 
-// AwardsSignal demo
+// AwardsSignal
 WITH ['film:skyfall','film:casino_royale','film:heat'] AS ids
 UNWIND ids AS fid
-MATCH (film:Entity:Film:Demo {id: fid})
+MATCH (film:Entity:Film {id: fid})
 WITH film, CASE film.id WHEN 'film:skyfall' THEN 'High' WHEN 'film:casino_royale' THEN 'Medium' ELSE 'Low' END AS sig
 MERGE (svs:SlotValue {slot:'AwardsSignal', value:sig})
 MERGE (film)-[:HAS_SLOT]->(svs);
@@ -86,7 +86,7 @@ WITH tPerson,
   {id:'person:robert_de_niro', name:'Robert De Niro', aliases:['Bob De Niro']}
 ] AS people
 UNWIND people AS p
-MERGE (person:Entity:Person:Demo {id: p.id})
+MERGE (person:Entity:Person {id: p.id})
 SET person.name = p.name,
     person.aliases = p.aliases
 MERGE (person)-[:INSTANCE_OF]->(tPerson);
@@ -104,13 +104,13 @@ WITH [
   {person:'person:robert_de_niro', film:'film:ronin'}
 ] AS roles
 UNWIND roles AS r
-MATCH (p:Entity:Person:Demo {id: r.person})
-MATCH (f:Entity:Film:Demo   {id: r.film})
+MATCH (p:Entity:Person {id: r.person})
+MATCH (f:Entity:Film   {id: r.film})
 MERGE (p)-[:ACTED_IN]->(f);
 
 // --- Provenance + one reified fact (Skyfall won BAFTA) ---
 MATCH (tAward:Type {name:'Award'})
-MERGE (aw:Entity:Award:Demo {id:'award:bafta', name:'BAFTA Award'})
+MERGE (aw:Entity:Award {id:'award:bafta', name:'BAFTA Award'})
 MERGE (aw)-[:INSTANCE_OF]->(tAward)
 MERGE (doc:Document {source_url:'https://en.wikipedia.org/wiki/Skyfall'})
 SET doc.title = 'Skyfall - Wikipedia', doc.doc_url = doc.source_url
@@ -121,11 +121,11 @@ MERGE (doc)-[:HAS_SECTION]->(sec)
 MERGE (sec)-[:HAS_PARAGRAPH]->(par)
 MERGE (par)-[:HAS_SENTENCE]->(sen);
 
-MATCH (sky:Entity:Film:Demo {id:'film:skyfall'})
-MATCH (aw:Entity:Award:Demo {id:'award:bafta'})
+MATCH (sky:Entity:Film {id:'film:skyfall'})
+MATCH (aw:Entity:Award {id:'award:bafta'})
 MATCH (doc:Document {source_url:'https://en.wikipedia.org/wiki/Skyfall'})
 MERGE (rt:RelationType {name:'WON_AWARD'})
-MERGE (fact:Fact:Demo {kind:'WON_AWARD'})
+MERGE (fact:Fact {kind:'WON_AWARD'})
 MERGE (fact)-[:SUBJECT]->(sky)
 MERGE (fact)-[:PREDICATE]->(rt)
 MERGE (fact)-[:OBJECT]->(aw)
@@ -133,22 +133,22 @@ MERGE (fact)-[:HAS_SOURCE {support:1.0}]->(doc);
 
 // Optional mentions
 MATCH (sen:Sentence {doc_url:'https://en.wikipedia.org/wiki/Skyfall', order: 1})
-MATCH (sky:Entity:Film:Demo {id:'film:skyfall'})
-MATCH (aw:Entity:Award:Demo {id:'award:bafta'})
+MATCH (sky:Entity:Film {id:'film:skyfall'})
+MATCH (aw:Entity:Award {id:'award:bafta'})
 MERGE (sen)-[:MENTIONS {confidence:0.9, via:'seed'}]->(sky)
 MERGE (sen)-[:MENTIONS {confidence:0.9, via:'seed'}]->(aw);
 
 // --- Checklist: IdentifyFilm ---
-MERGE (cl:Checklist:Demo {name:'IdentifyFilm', description:'Identify a specific film from clues'})
-MERGE (ss1:SlotSpec:Demo {checklist_name:'IdentifyFilm', name:'film', expect_labels:['Film'], rel:'INSTANCE_OF', required:true, cardinality:'ONE'})
-MERGE (ss2:SlotSpec:Demo {checklist_name:'IdentifyFilm', name:'year', expect_labels:['Year'], required:false, cardinality:'ONE'})
-MERGE (ss3:SlotSpec:Demo {checklist_name:'IdentifyFilm', name:'actor', expect_labels:['Person'], required:false, cardinality:'MANY'})
+MERGE (cl:Checklist {name:'IdentifyFilm', description:'Identify a specific film from clues'})
+MERGE (ss1:SlotSpec {checklist_name:'IdentifyFilm', name:'film', expect_labels:['Film'], rel:'INSTANCE_OF', required:true, cardinality:'ONE'})
+MERGE (ss2:SlotSpec {checklist_name:'IdentifyFilm', name:'year', expect_labels:['Year'], required:false, cardinality:'ONE'})
+MERGE (ss3:SlotSpec {checklist_name:'IdentifyFilm', name:'actor', expect_labels:['Person'], required:false, cardinality:'MANY'})
 MERGE (cl)-[:REQUIRES]->(ss1)
 MERGE (cl)-[:REQUIRES]->(ss2)
 MERGE (cl)-[:REQUIRES]->(ss3);
 
 // --- Sample counts ---
 RETURN
-  'films'   AS label, count { ( :Entity:Film:Demo ) } AS n_films,
-  'people'  AS label2, count { ( :Entity:Person:Demo ) } AS n_people,
+  'films'   AS label, count { ( :Entity:Film ) } AS n_films,
+  'people'  AS label2, count { ( :Entity:Person ) } AS n_people,
   'slots'   AS label3, count { ( :SlotValue ) } AS n_slots;
