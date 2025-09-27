@@ -12,10 +12,10 @@ VEGETA is a working Bayesian active inference prototype with:
 
 ## Features
 
-- **🧠 Bayesian Active Inference**: Uses Expected Information Gain (EIG) to decide between asking questions, searching for facts, or providing answers
+- **🧠 Bayesian Active Inference**: Uses Expected Information Gain (EIG) to decide between asking questions, searching for facts, or providing answers.
 - **🔗 Graph-Based Knowledge**: Leverages Neo4j knowledge graphs with semantic embeddings
-- **🔄 Multi-Turn Conversations**: Maintains conversation state and belief carryover across turns
-- **🎯 Smart Question Generation**: Uses LLMs to generate natural clarifying questions
+- **🔄 Multi-Turn Conversations**: Maintains conversation state and belief carryover across turns.
+- **🎯 Smart Question Generation**: Uses LLMs to generate natural clarifying questions based off retrieve uncertain nodes.
 - **📊 Uncertainty Quantification**: Tracks confidence and reasoning for transparent decision-making
 - **🎮 20-Questions style interaction**: Perfect for guessing games and interactive discovery
 
