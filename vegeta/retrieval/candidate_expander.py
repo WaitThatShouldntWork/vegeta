@@ -22,35 +22,43 @@ class CandidateExpander:
         self.defaults = config.system_defaults
     
     def expand_subgraphs(self, anchors: List[Dict], hops: int = None) -> List[Dict[str, Any]]:
-        """Expand anchors into candidate subgraphs"""
-        
+        """
+        Expand anchors into candidate subgraphs using full subgraph retrieval.
+        This implements the selective activation approach from attemp1TextOnly.py.
+        """
+
         if hops is None:
             hops = self.defaults['hops']
-        
+
         candidates = []
-        
+
         for i, anchor in enumerate(anchors):
             try:
-                # Get neighbors using database manager
-                neighbor_data = self.db_manager.get_entity_neighbors(anchor['id'], hops)
-                
-                if neighbor_data['connected_ids']:
-                    # Create subgraph candidate
+                # Get FULL subgraph data (includes nodes, relationships, facts)
+                subgraph_data = self.db_manager.get_full_subgraph(anchor['id'], hops)
+
+                # Only create candidate if we have meaningful content
+                if subgraph_data['metadata']['node_count'] > 1:  # More than just the anchor
+                    # Create rich subgraph candidate
                     candidate = {
                         'id': f"subgraph_{i}",
                         'anchor_id': anchor['id'],
                         'anchor_name': anchor['name'],
-                        'connected_ids': neighbor_data['connected_ids'],
-                        'connected_names': neighbor_data['connected_names'],
-                        'subgraph_size': neighbor_data['subgraph_size'],
+                        'subgraph': subgraph_data,  # Full subgraph data
                         'anchor_score': anchor['s_combined'],
-                        'retrieval_score': anchor['s_combined']  # Initial score from retrieval
+                        'retrieval_score': anchor['s_combined'],  # Initial score from retrieval
+
+                        # Backward compatibility fields
+                        'connected_ids': [node['id'] for node in subgraph_data['nodes'] if node.get('id') and node['id'] != anchor['id']],
+                        'connected_names': [node['name'] for node in subgraph_data['nodes'] if node.get('id') and node['id'] != anchor['id']],
+                        'subgraph_size': subgraph_data['metadata']['node_count'],
                     }
                     candidates.append(candidate)
-                
+
             except Exception as e:
                 logger.error(f"Subgraph expansion failed for anchor {anchor['id']}: {e}")
-        
+
+        logger.info(f"Expanded {len(anchors)} anchors into {len(candidates)} rich subgraph candidates")
         return candidates
     
     def enumerate_target_candidates_from_anchors(self, anchors: List[Dict[str, Any]], 
@@ -73,26 +81,36 @@ class CandidateExpander:
                 anchor_id = anchor.get('id')
                 anchor_name = anchor.get('name')
                 anchor_score = float(anchor.get('s_combined', 0.0))
-                if not anchor_id:
+                if not anchor_id or not anchor_name:
                     continue
 
                 # Use variable-length paths and min(length) to avoid shortestPath start=end issues
                 query = f"""
                 MATCH (start:Entity {{id: $anchor_id}})
                 MATCH p = (start)-[*1..{hops}]-(cand)
-                WHERE cand.id <> start.id
+                WHERE (cand.id IS NULL OR cand.id <> start.id)
                   AND any(lbl IN labels(cand) WHERE lbl IN $target_labels)
                 WITH cand, min(length(p)) AS dist
-                RETURN cand.id AS id, cand.name AS name, labels(cand) AS labels, dist
+                RETURN cand.id AS id,
+                       CASE WHEN cand.name IS NOT NULL THEN cand.name
+                            WHEN cand.title IS NOT NULL THEN cand.title
+                            ELSE cand.id END AS name,
+                       labels(cand) AS labels, dist
                 ORDER BY dist ASC
                 LIMIT $limit
                 """
                 
                 results = self.db_manager.execute_query(query, {
-                    'anchor_id': anchor_id, 
-                    'target_labels': target_labels, 
+                    'anchor_id': anchor_id,
+                    'target_labels': target_labels,
                     'limit': limit_per_anchor
                 })
+
+                # Debug logging
+                logger.debug(f"Anchor {anchor_id}: target_labels={target_labels}, results={len(results)}")
+                if results:
+                    for r in results[:2]:  # Log first 2 results
+                        logger.debug(f"  Found: {r.get('name')} (labels: {r.get('labels')})")
                 
                 for rec in results:
                     cand_id = rec["id"]
@@ -127,8 +145,12 @@ class CandidateExpander:
         # Convert to standard candidate format
         result_candidates = []
         for i, cand in enumerate(candidates):
+            # Skip candidates with invalid best_anchor
+            if not cand.get('best_anchor') or not cand['best_anchor'].get('id'):
+                continue
+
             neighbor_data = self.db_manager.get_entity_neighbors(cand['entity_id'], 1)
-            
+
             result_candidates.append({
                 'id': f"cand_{i}",
                 'anchor_id': cand['best_anchor']['id'],

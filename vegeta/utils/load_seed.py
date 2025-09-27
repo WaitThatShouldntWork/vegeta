@@ -150,42 +150,72 @@ class DatabaseLoader:
             if not Path(file_path).exists():
                 logger.error(f"✗ Seed file not found: {file_path}")
                 return False
-            
+
             with open(file_path, 'r', encoding='utf-8') as f:
                 cypher_content = f.read()
-            
+
             logger.info(f"📁 Executing Cypher file: {file_path}")
-            
-            # Better statement parsing - split on ';' but only when it's at end of line
-            # and not inside strings
+
+            # Improved Cypher statement parsing
             import re
-            
-            # Remove comments
-            cleaned_content = re.sub(r'//.*$', '', cypher_content, flags=re.MULTILINE)
-            
-            # Split on semicolons that are followed by whitespace/newline (not in strings)
-            # This is a simple heuristic - for production would use proper Cypher parser
+
+            # Remove comments (but preserve semicolons in comments)
+            # Only remove comments that start after whitespace or at line start, not inside strings
+            cleaned_content = re.sub(r'^\s*//.*$', '', cypher_content, flags=re.MULTILINE)
+
             statements = []
             current_statement = ""
-            
-            for line in cleaned_content.split('\n'):
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                current_statement += " " + line
-                
-                # Check if this line ends a statement (ends with semicolon)
-                if line.endswith(';'):
+            in_string = False
+            string_char = None
+            brace_depth = 0
+            bracket_depth = 0
+
+            i = 0
+            while i < len(cleaned_content):
+                char = cleaned_content[i]
+
+                # Handle string literals
+                if char in ['"', "'"] and (i == 0 or cleaned_content[i-1] != '\\'):
+                    if not in_string:
+                        in_string = True
+                        string_char = char
+                    elif char == string_char:
+                        in_string = False
+                        string_char = None
+
+                # Track braces and brackets
+                elif not in_string:
+                    if char == '{':
+                        brace_depth += 1
+                    elif char == '}':
+                        brace_depth -= 1
+                    elif char == '[':
+                        bracket_depth += 1
+                    elif char == ']':
+                        bracket_depth -= 1
+
+                # Build current statement
+                current_statement += char
+
+                # Check for statement end - semicolon at top level (not in strings/braces/brackets)
+                if (char == ';' and
+                    not in_string and
+                    brace_depth == 0 and
+                    bracket_depth == 0):
+
                     statement = current_statement.strip()
                     if statement and not statement.startswith('//'):
                         statements.append(statement)
                     current_statement = ""
-            
+
+                i += 1
+
             # Add any remaining statement
             if current_statement.strip():
-                statements.append(current_statement.strip())
-            
+                statement = current_statement.strip()
+                if statement and not statement.startswith('//'):
+                    statements.append(statement)
+
             logger.info(f"Found {len(statements)} Cypher statements to execute")
             
             with self.driver.session(database=NEO4J_DATABASE) as session:
@@ -315,17 +345,136 @@ class DatabaseLoader:
         except Exception as e:
             logger.warning(f"⚠ Could not drop all constraints: {e}")
     
+    def generate_embeddings_only(self) -> bool:
+        """Generate embeddings for all entities (without reloading data)"""
+        try:
+            logger.info("🧠 Generating embeddings for entities...")
+            from neo4j import GraphDatabase
+
+            driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+            with driver.session(database=NEO4J_DATABASE) as session:
+                # Get all entities that need embeddings (Entity, Checklist, SlotSpec)
+                result = session.run("""
+                    MATCH (e)
+                    WHERE e:Entity OR e:Checklist OR e:SlotSpec
+                    RETURN CASE
+                             WHEN e:Checklist THEN e.id
+                             WHEN e:SlotSpec THEN e.id
+                             ELSE e.id
+                           END as id,
+                           CASE
+                             WHEN e:Checklist THEN e.name
+                             WHEN e:SlotSpec THEN e.name
+                             ELSE e.name
+                           END as name,
+                           CASE
+                             WHEN e:Checklist THEN e.description
+                             WHEN e:SlotSpec THEN e.name + ' for ' + e.checklist_name
+                             ELSE coalesce(e.name, '')
+                           END as description,
+                           labels(e) as labels
+                """)
+                entities = list(result)
+
+                logger.info(f"Found {len(entities)} entities to process")
+
+                for i, entity in enumerate(entities):
+                    entity_id = entity['id']
+                    name = entity['name']
+                    description = entity['description'] or ''
+                    labels = entity['labels']
+
+                    # Debug logging for Checklist and SlotSpec nodes
+                    if 'Checklist' in labels or 'SlotSpec' in labels:
+                        logger.info(f"🔍 Processing {labels}: {name} (desc: '{description}')")
+
+                    # Create text for embedding (name + description)
+                    # Handle None values properly and ensure we have some text to embed
+                    text_parts = []
+                    if name:
+                        text_parts.append(name)
+                    if description and description != name:
+                        text_parts.append(description)
+
+                    # If we have no text at all, use the ID as fallback
+                    if not text_parts:
+                        text_parts = [entity_id.split(':')[-1]]  # Use the last part of the ID
+
+                    embed_text = ' '.join(text_parts)
+
+                    # Debug logging for problematic nodes
+                    if not embed_text.strip():
+                        logger.warning(f"⚠ Empty embed_text for node {entity_id} (labels: {labels}, name: '{name}', desc: '{description}')")
+
+                    # Generate semantic embedding
+                    sem_emb = self.get_embedding(embed_text)
+                    if sem_emb is not None:
+                        # Debug logging for Checklist and SlotSpec
+                        if 'Checklist' in labels or 'SlotSpec' in labels:
+                            logger.info(f"💾 Storing embedding for {labels}: {name} (size: {len(sem_emb)})")
+
+                        # Store embedding in database - handle different node types
+                        try:
+                            result = session.run("""
+                                MATCH (e {id: $id})
+                                SET e.sem_emb = $embedding,
+                                    e.embed_text = $embed_text,
+                                    e.embed_timestamp = datetime()
+                                RETURN e.id as stored_id, labels(e) as stored_labels
+                            """, id=entity_id, embedding=sem_emb.tolist(), embed_text=embed_text)
+
+                            # Verify storage
+                            stored = result.single()
+                            if stored:
+                                stored_id = stored['stored_id']
+                                stored_labels = stored['stored_labels']
+                                if 'Checklist' in labels or 'SlotSpec' in labels:
+                                    logger.info(f"✅ Verified storage for {stored_labels}: {name} (stored_id: {stored_id})")
+                            else:
+                                logger.error(f"❌ Storage failed for {labels}: {name} - no result returned")
+                        except Exception as store_error:
+                            logger.error(f"❌ Storage error for {labels}: {name} - {store_error}")
+
+                        self.stats['embeddings_generated'] += 1
+
+                        if (i + 1) % 10 == 0:
+                            logger.info(f"  Processed {i + 1}/{len(entities)} entities")
+                    else:
+                        logger.warning(f"Failed to generate embedding for entity: {entity_id}")
+
+            logger.info(f"✓ Generated embeddings for {len(entities)} entities")
+            return True
+
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}")
+            return False
+
     def generate_embeddings(self) -> bool:
         """Generate embeddings for all entities"""
         try:
             logger.info("🧠 Generating embeddings for entities...")
             
             with self.driver.session(database=NEO4J_DATABASE) as session:
-                # Get all entities that need embeddings
+                # Get all entities that need embeddings (Entity, Checklist, SlotSpec)
                 result = session.run("""
-                    MATCH (e:Entity)
-                    RETURN e.id as id, e.name as name, e.aliases as aliases,
-                           coalesce(e.plot, e.summary, '') as description
+                    MATCH (e)
+                    WHERE e:Entity OR e:Checklist OR e:SlotSpec
+                    RETURN CASE
+                             WHEN e:Checklist THEN e.id
+                             WHEN e:SlotSpec THEN e.id
+                             ELSE e.id
+                           END as id,
+                           CASE
+                             WHEN e:Checklist THEN e.name
+                             WHEN e:SlotSpec THEN e.name
+                             ELSE e.name
+                           END as name,
+                           CASE
+                             WHEN e:Checklist THEN e.description
+                             WHEN e:SlotSpec THEN e.name + ' for ' + e.checklist_name
+                             ELSE coalesce(e.name, '')
+                           END as description,
+                           labels(e) as labels
                 """)
                 entities = list(result)
                 
@@ -334,29 +483,60 @@ class DatabaseLoader:
                 for i, entity in enumerate(entities):
                     entity_id = entity['id']
                     name = entity['name']
-                    aliases = entity['aliases'] or []
                     description = entity['description'] or ''
-                    
-                    # Create text for embedding (name + aliases + description)
-                    # Handle None values properly
-                    text_parts = [name] if name else []
-                    if aliases:
-                        text_parts.extend([alias for alias in aliases if alias])
-                    if description:
+                    labels = entity['labels']
+
+                    # Debug logging for Checklist and SlotSpec nodes
+                    if 'Checklist' in labels or 'SlotSpec' in labels:
+                        logger.info(f"🔍 Processing {labels}: {name} (desc: '{description}')")
+
+                    # Create text for embedding (name + description)
+                    # Handle None values properly and ensure we have some text to embed
+                    text_parts = []
+                    if name:
+                        text_parts.append(name)
+                    if description and description != name:
                         text_parts.append(description)
+
+                    # If we have no text at all, use the ID as fallback
+                    if not text_parts:
+                        text_parts = [entity_id.split(':')[-1]]  # Use the last part of the ID
+
                     embed_text = ' '.join(text_parts)
-                    
+
+                    # Debug logging for problematic nodes
+                    if not embed_text.strip():
+                        logger.warning(f"⚠ Empty embed_text for node {entity_id} (labels: {labels}, name: '{name}', desc: '{description}')")
+
                     # Generate semantic embedding
                     sem_emb = self.get_embedding(embed_text)
                     if sem_emb is not None:
-                        # Store embedding in database
-                        session.run("""
-                            MATCH (e:Entity {id: $id})
-                            SET e.sem_emb = $embedding,
-                                e.embed_text = $embed_text,
-                                e.embed_timestamp = datetime()
-                        """, id=entity_id, embedding=sem_emb.tolist(), embed_text=embed_text)
-                        
+                        # Debug logging for Checklist and SlotSpec
+                        if 'Checklist' in labels or 'SlotSpec' in labels:
+                            logger.info(f"💾 Storing embedding for {labels}: {name} (size: {len(sem_emb)})")
+
+                        # Store embedding in database - handle different node types
+                        try:
+                            result = session.run("""
+                                MATCH (e {id: $id})
+                                SET e.sem_emb = $embedding,
+                                    e.embed_text = $embed_text,
+                                    e.embed_timestamp = datetime()
+                                RETURN e.id as stored_id, labels(e) as stored_labels
+                            """, id=entity_id, embedding=sem_emb.tolist(), embed_text=embed_text)
+
+                            # Verify storage
+                            stored = result.single()
+                            if stored:
+                                stored_id = stored['stored_id']
+                                stored_labels = stored['stored_labels']
+                                if 'Checklist' in labels or 'SlotSpec' in labels:
+                                    logger.info(f"✅ Verified storage for {stored_labels}: {name} (stored_id: {stored_id})")
+                            else:
+                                logger.error(f"❌ Storage failed for {labels}: {name} - no result returned")
+                        except Exception as store_error:
+                            logger.error(f"❌ Storage error for {labels}: {name} - {store_error}")
+
                         self.stats['embeddings_generated'] += 1
                         
                         if (i + 1) % 10 == 0:
@@ -375,36 +555,117 @@ class DatabaseLoader:
             return False
     
     def create_vector_indexes(self) -> bool:
-        """Create vector indexes for similarity search"""
+        """Create vector indexes for similarity search with robust version detection"""
         try:
             logger.info("📊 Creating vector indexes...")
-            
+
             with self.driver.session(database=NEO4J_DATABASE) as session:
-                # Check Neo4j version for vector index support
+                # Check Neo4j version and capabilities
                 try:
-                    # Create vector index for semantic embeddings
-                    session.run(f"""
-                        CREATE VECTOR INDEX entity_semantic_index IF NOT EXISTS
-                        FOR (e:Entity) ON (e.sem_emb)
-                        OPTIONS {{
-                            indexConfig: {{
-                                `vector.dimensions`: {EMBEDDING_DIMENSION},
+                    # Get server info to determine capabilities
+                    result = session.run("CALL dbms.components() YIELD name, versions, edition")
+                    server_info = list(result)
+                    neo4j_version = None
+                    for component in server_info:
+                        if component['name'] == 'Neo4j Kernel':
+                            neo4j_version = component['versions'][0]
+                            break
+
+                    logger.info(f"Detected Neo4j version: {neo4j_version}")
+
+                    # Try to create vector index for semantic embeddings
+                    try:
+                        if neo4j_version and neo4j_version.startswith('5'):
+                            # Neo4j 5.x vector index syntax
+                            session.run(f"""
+                                CREATE VECTOR INDEX entity_semantic_index IF NOT EXISTS
+                                FOR (e:Entity) ON (e.sem_emb)
+                                OPTIONS {{
+                                    indexConfig: {{
+                                        `vector.dimensions`: {EMBEDDING_DIMENSION},
+                                        `vector.similarity_function`: 'cosine'
+                                    }}
+                                }}
+                            """)
+                            logger.info("✓ Created Neo4j 5.x semantic embedding vector index")
+                        else:
+                            # Try alternative syntax or fallback
+                            try:
+                                session.run(f"""
+                                    CREATE VECTOR INDEX entity_semantic_index IF NOT EXISTS
+                                    FOR (e:Entity) ON (e.sem_emb)
+                                    OPTIONS {{
+                                        indexConfig: {{
+                                            `vector.dimensions`: {EMBEDDING_DIMENSION},
+                                            `vector.similarity_function`: 'cosine'
+                                        }}
+                                    }}
+                                """)
+                                logger.info("✓ Created semantic embedding vector index")
+                            except ClientError as ve:
+                                if "vector" in str(ve).lower() or "not supported" in str(ve).lower():
+                                    logger.warning("⚠ Vector indexes not supported - embeddings will be stored but not indexed")
+                                    logger.info("Consider upgrading to Neo4j 5.0+ for vector index support")
+                                    # Still count as successful since embeddings are stored
+                                else:
+                                    raise ve
+
+                        self.stats['indexes_created'] += 1
+
+                    except ClientError as e:
+                        if "already exists" in str(e):
+                            logger.info("📋 Semantic embedding vector index already exists")
+                            self.stats['indexes_created'] += 1
+                        elif "vector" in str(e).lower():
+                            logger.warning("⚠ Vector indexes not supported in this Neo4j version")
+                            logger.info("Embeddings will be stored but similarity search will be slower")
+                        else:
+                            logger.warning(f"Vector index creation issue: {e}")
+                            # Continue - embeddings are still valuable even without vector index
+
+                except Exception as e:
+                    logger.warning(f"Could not determine Neo4j version: {e}")
+                    logger.info("Proceeding with basic vector index attempt...")
+
+                # Additional vector indexes for different entity types
+                try:
+                    # Index for Award entities if they have embeddings
+                    session.run("""
+                        CREATE VECTOR INDEX award_semantic_index IF NOT EXISTS
+                        FOR (a:Entity:Award) ON (a.sem_emb)
+                        OPTIONS {
+                            indexConfig: {
+                                `vector.dimensions`: $dimensions,
                                 `vector.similarity_function`: 'cosine'
-                            }}
-                        }}
-                    """)
-                    logger.info("✓ Created semantic embedding vector index")
+                            }
+                        }
+                    """, dimensions=EMBEDDING_DIMENSION)
+                    logger.info("✓ Created award semantic vector index")
                     self.stats['indexes_created'] += 1
-                    
                 except ClientError as e:
-                    if "vector" in str(e).lower():
-                        logger.warning("⚠ Vector indexes not supported in this Neo4j version")
-                        logger.info("Consider upgrading to Neo4j 5.0+ for vector index support")
-                    else:
-                        logger.warning(f"Vector index creation issue: {e}")
-                
+                    if "already exists" not in str(e):
+                        logger.debug(f"Award vector index creation skipped: {e}")
+
+                try:
+                    # Index for Person entities
+                    session.run("""
+                        CREATE VECTOR INDEX person_semantic_index IF NOT EXISTS
+                        FOR (p:Entity:Person) ON (p.sem_emb)
+                        OPTIONS {
+                            indexConfig: {
+                                `vector.dimensions`: $dimensions,
+                                `vector.similarity_function`: 'cosine'
+                            }
+                        }
+                    """, dimensions=EMBEDDING_DIMENSION)
+                    logger.info("✓ Created person semantic vector index")
+                    self.stats['indexes_created'] += 1
+                except ClientError as e:
+                    if "already exists" not in str(e):
+                        logger.debug(f"Person vector index creation skipped: {e}")
+
                 return True
-                
+
         except Exception as e:
             logger.error(f"✗ Failed to create vector indexes: {e}")
             self.stats['errors'].append(f"Vector index creation: {e}")
@@ -414,25 +675,60 @@ class DatabaseLoader:
         """Create fulltext indexes for entity lookup"""
         try:
             logger.info("🔍 Creating fulltext indexes...")
-            
+
             with self.driver.session(database=NEO4J_DATABASE) as session:
+                # Entity names and aliases index
                 try:
-                    # Create fulltext index for entity names and aliases
                     session.run("""
                         CREATE FULLTEXT INDEX entity_name_fulltext IF NOT EXISTS
                         FOR (e:Entity) ON EACH [e.name, e.aliases]
                     """)
                     logger.info("✓ Created entity name fulltext index")
                     self.stats['indexes_created'] += 1
-                    
                 except ClientError as e:
                     if "already exists" in str(e):
-                        logger.info("📋 Fulltext index already exists")
+                        logger.info("📋 Entity fulltext index already exists")
                     else:
-                        logger.warning(f"Fulltext index creation issue: {e}")
-                
+                        logger.warning(f"Entity fulltext index creation issue: {e}")
+
+                # Film-specific index for plot and title search
+                try:
+                    session.run("""
+                        CREATE FULLTEXT INDEX film_content_fulltext IF NOT EXISTS
+                        FOR (f:Film) ON EACH [f.name]
+                    """)
+                    logger.info("✓ Created film content fulltext index")
+                    self.stats['indexes_created'] += 1
+                except ClientError as e:
+                    if "already exists" not in str(e):
+                        logger.warning(f"Film fulltext index creation issue: {e}")
+
+                # Award names index
+                try:
+                    session.run("""
+                        CREATE FULLTEXT INDEX award_name_fulltext IF NOT EXISTS
+                        FOR (a:Award) ON EACH [a.name]
+                    """)
+                    logger.info("✓ Created award name fulltext index")
+                    self.stats['indexes_created'] += 1
+                except ClientError as e:
+                    if "already exists" not in str(e):
+                        logger.warning(f"Award fulltext index creation issue: {e}")
+
+                # Person names index
+                try:
+                    session.run("""
+                        CREATE FULLTEXT INDEX person_name_fulltext IF NOT EXISTS
+                        FOR (p:Person) ON EACH [p.name, p.aliases]
+                    """)
+                    logger.info("✓ Created person name fulltext index")
+                    self.stats['indexes_created'] += 1
+                except ClientError as e:
+                    if "already exists" not in str(e):
+                        logger.warning(f"Person fulltext index creation issue: {e}")
+
                 return True
-                
+
         except Exception as e:
             logger.error(f"✗ Failed to create fulltext indexes: {e}")
             self.stats['errors'].append(f"Fulltext index creation: {e}")
@@ -444,11 +740,30 @@ class DatabaseLoader:
             logger.info("⚡ Creating standard property indexes...")
             
             index_definitions = [
+                # Core entity and type indexes
                 "CREATE INDEX entity_id_index IF NOT EXISTS FOR (e:Entity) ON (e.id)",
                 "CREATE INDEX type_name_index IF NOT EXISTS FOR (t:Type) ON (t.name)",
                 "CREATE INDEX relation_type_name_index IF NOT EXISTS FOR (r:RelationType) ON (r.name)",
                 "CREATE INDEX slot_value_composite_index IF NOT EXISTS FOR (sv:SlotValue) ON (sv.slot, sv.value)",
-                "CREATE INDEX document_url_index IF NOT EXISTS FOR (d:Document) ON (d.source_url)"
+                "CREATE INDEX document_url_index IF NOT EXISTS FOR (d:Document) ON (d.source_url)",
+
+                # Fact and relationship indexes for better query performance
+                "CREATE INDEX fact_kind_index IF NOT EXISTS FOR (f:Fact) ON (f.kind)",
+                "CREATE INDEX fact_confidence_index IF NOT EXISTS FOR (f:Fact) ON (f.confidence)",
+                "CREATE INDEX checklist_name_index IF NOT EXISTS FOR (c:Checklist) ON (c.name)",
+                "CREATE INDEX slotspec_checklist_index IF NOT EXISTS FOR (ss:SlotSpec) ON (ss.checklist_name)",
+
+                # Entity subtype indexes
+                "CREATE INDEX film_entity_id_index IF NOT EXISTS FOR (f:Film) ON (f.id)",
+                "CREATE INDEX person_entity_id_index IF NOT EXISTS FOR (p:Person) ON (p.id)",
+                "CREATE INDEX award_entity_id_index IF NOT EXISTS FOR (a:Award) ON (a.id)",
+                "CREATE INDEX year_entity_id_index IF NOT EXISTS FOR (y:Year) ON (y.id)",
+                "CREATE INDEX year_value_index IF NOT EXISTS FOR (y:Year) ON (y.value)",
+
+                # Section and paragraph indexes for provenance
+                "CREATE INDEX section_doc_order_index IF NOT EXISTS FOR (s:Section) ON (s.doc_url, s.order)",
+                "CREATE INDEX paragraph_doc_order_index IF NOT EXISTS FOR (p:Paragraph) ON (p.doc_url, p.order)",
+                "CREATE INDEX sentence_doc_order_index IF NOT EXISTS FOR (snt:Sentence) ON (snt.doc_url, snt.order)"
             ]
             
             with self.driver.session(database=NEO4J_DATABASE) as session:
@@ -480,13 +795,33 @@ class DatabaseLoader:
             with self.driver.session(database=NEO4J_DATABASE) as session:
                 # Count various node types
                 counts = {}
-                node_types = ['Entity', 'Type', 'SlotValue', 'Document', 'Checklist', 'Fact']
-                
+                node_types = ['Entity', 'Type', 'SlotValue', 'Document', 'Checklist', 'Fact',
+                            'Section', 'Paragraph', 'Sentence', 'RelationType']
+
                 for node_type in node_types:
                     result = session.run(f"MATCH (n:{node_type}) RETURN count(n) as count")
                     counts[node_type] = result.single()['count']
-                
+
+                # Count entity subtypes
+                subtype_counts = {}
+                entity_subtypes = ['Entity:Film', 'Entity:Person', 'Entity:Award', 'Entity:Year',
+                                 'Entity:Rating', 'Entity:Genre']
+
+                for subtype in entity_subtypes:
+                    result = session.run(f"MATCH (n:{subtype}) RETURN count(n) as count")
+                    subtype_counts[subtype] = result.single()['count']
+
                 validation_results['node_counts'] = counts
+                validation_results['subtype_counts'] = subtype_counts
+
+                # Check Fact types distribution
+                result = session.run("""
+                    MATCH (f:Fact)
+                    RETURN f.kind as fact_kind, count(*) as count
+                    ORDER BY count DESC
+                """)
+                fact_types = {record['fact_kind']: record['count'] for record in result}
+                validation_results['fact_types'] = fact_types
                 
                 # Check embeddings
                 result = session.run("""
@@ -535,13 +870,24 @@ class DatabaseLoader:
             print("\n📋 NODE COUNTS:")
             for node_type, count in validation_results['node_counts'].items():
                 print(f"  {node_type}: {count}")
-            
+
+            if 'subtype_counts' in validation_results:
+                print("\n🎭 ENTITY SUBTYPES:")
+                for subtype, count in validation_results['subtype_counts'].items():
+                    if count > 0:
+                        print(f"  {subtype}: {count}")
+
+            if 'fact_types' in validation_results:
+                print("\n🔍 FACT TYPES:")
+                for fact_type, count in validation_results['fact_types'].items():
+                    print(f"  {fact_type}: {count}")
+
             print("\n🧠 EMBEDDING COVERAGE:")
             emb_stats = validation_results['embedding_coverage']
             print(f"  Total entities: {emb_stats['total_entities']}")
             print(f"  With embeddings: {emb_stats['with_embeddings']}")
             print(f"  Coverage: {emb_stats['coverage_pct']:.1f}%")
-            
+
             print(f"\n📊 CONSTRAINTS: {len(validation_results.get('constraints', []))}")
             print(f"📊 INDEXES: {len(validation_results.get('indexes', []))}")
         

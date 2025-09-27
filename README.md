@@ -1,6 +1,14 @@
 # VEGETA - Variational Evidence Graph, Estimating Temporal Activations
 
-A sophisticated system for active inference using Bayesian decision theory, designed for complex conversational interactions and graph-based knowledge retrieval.
+A  **Bayesian Active Inference System** implementing complete **predictive coding** architecture for complex conversational interactions and graph-based knowledge retrieval.
+
+VEGETA is a working Bayesian active inference prototype with:
+- ✅ **Complete Predictive Coding Pipeline**: Generative model → likelihood → posterior updates
+- ✅ **Three-Channel Predictions**: Semantic, structural, and terms prediction channels
+- ✅ **Active Inference Engine**: EIG-based decision making with ASK/SEARCH/ANSWER actions
+- ✅ **Comprehensive Benchmarking**: 33 test cases with evaluation metrics
+- ✅ **Multi-Turn Session Management**: Belief carryover and context awareness
+- ✅ **Graph-Based Knowledge Retrieval**: Neo4j integration with 21 nodes and 100% embedding coverage
 
 ## Features
 
@@ -17,8 +25,9 @@ A sophisticated system for active inference using Bayesian decision theory, desi
 
 1. **Neo4j Database**: Running locally on bolt://localhost:7687
 2. **Ollama**: Running locally on http://localhost:11434 with these models:
-   - `gemma:4b` (for question generation)
-   - `nomic-embed-text` (for embeddings)
+   - `qwen3:8b` (for question generation, default)
+   - `gemma:4b` or `deepseek-r1:8b` (alternative models)
+   - `nomic-embed-text:latest` (for embeddings)
 
 ### Installation
 
@@ -80,6 +89,7 @@ python -m vegeta.interfaces.cli --debug query "test"      # Show all debug logs 
 
 # Interactive Mode (20-Questions Game)
 python -m vegeta.interfaces.cli interactive               # Start interactive session
+python -m vegeta.interfaces.cli interactive --verbose     # Interactive with detailed timing and debug info
 python -m vegeta.interfaces.cli interactive --config custom.yaml  # Use custom config
 
 # Single Query Processing
@@ -129,6 +139,11 @@ python -m vegeta.interfaces.benchmark_cli --type full --save --verbose  # Full b
 python -m vegeta.interfaces.cli --config /path/to/config.yaml interactive
 python -m vegeta.interfaces.cli query --config custom.yaml "test"
 python -m vegeta.interfaces.cli benchmark --config production.yaml --type full
+
+# Using console scripts (after pip install -e .)
+vegeta interactive
+vegeta query "test query"
+vegeta-benchmark --type quick
 ```
 
 #### Python API
@@ -154,24 +169,33 @@ print(f"Confidence: {response.confidence:.1%}")
 ### Core Components
 
 ```
-src/
+vegeta/
 ├── core/               # System orchestration and configuration
 ├── extraction/         # Entity extraction and semantic analysis
 ├── retrieval/          # Graph-based candidate retrieval
-├── inference/          # Bayesian prior/posterior updates
+├── inference/          # Complete predictive coding pipeline
+│   ├── active_inference_engine.py  # EIG-based decision making
+│   ├── generative_model.py         # Three-channel predictions
+│   ├── likelihood_computer.py      # Evidence integration
+│   ├── prior_builder.py           # Multi-source prior construction
+│   └── types.py                   # Type definitions
 ├── session/            # Multi-turn conversation management
 ├── generation/         # Natural language question/answer generation
 ├── interfaces/         # CLI and web interfaces
+├── testing/            # Comprehensive benchmark suite
 └── utils/              # Database and LLM utilities
 ```
 
 ### Key Algorithms
 
-1. **Entity Extraction**: LLM-based extraction of canonical terms and entities
-2. **Semantic Retrieval**: Embedding-based anchor selection and subgraph expansion
-3. **Bayesian Inference**: Prior construction and posterior updates using observed evidence
-4. **Decision Making**: Expected Information Gain calculation for ASK vs SEARCH vs ANSWER
-5. **Question Generation**: LLM-powered natural language question formulation
+1. **Complete Predictive Coding**: Three-channel generative model (semantic, structural, terms)
+2. **Entity Extraction**: LLM-based extraction of canonical terms and entities
+3. **Semantic Retrieval**: Embedding-based anchor selection and subgraph expansion
+4. **Bayesian Active Inference**: Full likelihood computation with evidence integration
+5. **Multi-Source Prior Construction**: Step priors, slot priors, and conversation history
+6. **Expected Information Gain**: 2-step EIG planning for optimal decision making
+7. **Adaptive Question Generation**: Context-aware LLM question formulation
+8. **Session State Management**: Belief carryover with inertia parameter ρ
 
 ## Configuration
 
@@ -182,29 +206,134 @@ database:
   uri: "bolt://localhost:7687"
   username: "neo4j"
   password: "password"
+  database: "neo4j"
 
 ollama:
   base_url: "http://localhost:11434"
-  default_model: "gemma:4b"
-  embedding_model: "nomic-embed-text"
+  default_model: "qwen3:8b"
+  embedding_model: "nomic-embed-text:latest"
 
 system:
   defaults:
     k_anchors: 10
+    M_candidates: 20
+    hops: 2
     tau_retrieval: 0.7
-    alpha: 1.0    # Semantic weight
-    beta: 0.5     # Structural weight
-    gamma: 0.3    # Terms weight
+    tau_posterior: 0.7
+    alpha: 1.0         # Semantic weight
+    beta: 0.5          # Structural weight
+    gamma: 0.3         # Terms weight
+    sigma_sem_sq: 0.3
+    sigma_struct_sq: 0.2
+    sigma_terms_sq: 0.2
+    N_terms_max: 15
+    N_expected: 20
+    small_set_threshold: 3
+    small_set_blend: 0.5
+    lambda_missing: 0.30
+    d_cap: 40
+    lambda_hub: 0.02
+
+session:
+  timeout: 3600       # 1 hour
+  max_turns: 20
+  inertia_rho: 0.7
+
+  # Context window management
+  max_context_tokens: 2048
+  summary_tokens: 256
+  context_window_turns: 5
+  compression_ratio: 0.3
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 ```
 
-## Multi-Turn Sessions
+## Multi-Turn Sessions & Predictive Coding
 
-VEGETA maintains conversation state across turns:
+VEGETA implements a complete **predictive coding architecture** with sophisticated Bayesian inference for multi-turn conversations:
 
-- **Belief Carryover**: Posteriors from previous turns inform current priors
-- **Conversation History**: Tracks questions asked and answers received
-- **Adaptive Learning**: Adjusts strategy based on user responses
-- **Session Management**: Handles timeouts and session persistence
+### 🧠 Complete Predictive Coding Pipeline
+
+VEGETA's core is a fully operational Bayesian active inference system with three-channel predictive coding:
+
+1. **Generative Model (G)**: Predicts expected observations from hidden states
+   - Semantic predictions using embedding similarity
+   - Structural predictions using checklist requirements
+   - Terms predictions using subgraph analysis
+
+2. **Likelihood Computation**: Three-channel distance computation with proper normalization
+   - Semantic likelihood using embedding similarity
+   - Structural likelihood using checklist expectations
+   - Terms likelihood with subgraph analysis and penalties
+
+3. **Prior Construction**: Multi-source prior building
+   - Step priors from procedure tracking
+   - Slot priors from candidate subgraph analysis
+   - Conversation history integration with inertia parameter ρ
+
+4. **Active Inference Engine**: EIG-based decision making
+   - 2-step Expected Information Gain planning
+   - ASK/SEARCH/ANSWER action selection
+   - Posterior updates with confidence scoring
+
+### 🎯 MOMDP Architecture (In Development)
+
+VEGETA is being formalized as a **Mixed Observability Markov Decision Process** for principled action selection:
+
+**State Factorization:**
+- **Observed State (x)**: Checklist, procedure step, filled slots, retrieved facts
+- **Hidden State (y)**: Unfilled slot values, subgraph beliefs, novelty indicators
+
+**Core Components:**
+- **T(s'|s,a)**: Transition dynamics with factorized observed/hidden state evolution
+- **O(o|x',y',a)**: Action-conditioned observation model with slot confusion rates
+- **R(x,y,a)**: Reward model balancing accuracy, cost, and time efficiency
+- **Belief Update**: `b_{t+1}(y') ∝ O(o|x',y',a) * Σ_y T_y(y'|x,y,a) * b_t(y)`
+
+This formalization provides:
+- Rigorous EIG calculations using proper observation likelihoods
+- Principled multi-turn belief carryover through state transitions
+- Clear separation of concerns between observed facts and uncertain hypotheses
+
+### 🎯 Advanced Session Management
+
+VEGETA maintains sophisticated conversation state across turns:
+
+- **Belief Carryover**: Posteriors from previous turns inform current priors through tempered carryover
+- **Observation Persistence**: Stores utterance observations (u) to influence next turn's priors
+- **Context Window Management**: Smart token management with conversation compression
+- **Entity Memory**: Remembers confirmed entities to avoid repetitive questions
+- **Session Persistence**: Handles timeouts, turn limits, and session recovery
+
+### 📊 Bayesian State Management
+
+Advanced Bayesian filtering with predictive coding:
+
+```python
+# Complete predictive coding pipeline
+g(v) → u'_sem, u'_struct, u'_terms  # Generative predictions
+p(u|z) = likelihood computation     # Evidence integration
+p(z|u) = posterior updates         # Belief refinement
+EIG = expected information gain     # Decision optimization
+
+# Multi-turn belief evolution
+p_{t+1}(z) ∝ (q_t(z))^ρ × base_prior × context_boost × procedure_prior
+
+# Where:
+# - ρ ∈ (0,1]: inertia parameter (0.7 = balanced, 1.0 = sticky)
+# - context_boost: utterance similarity + entity continuity (0.3-0.9)
+# - procedure_prior: checklist-driven expectations
+# - q_t(z): posterior beliefs from previous turn
+```
+
+**Key Features:**
+- **Complete Predictive Coding**: Full generative model → likelihood → posterior pipeline
+- **Three-Channel Predictions**: Semantic, structural, and terms prediction channels
+- **Procedure-Driven Reasoning**: Checklist-based task execution with slot filling
+- **Uncertainty Quantification**: Confidence scores with calibration and entropy analysis
+- **Adaptive Question Generation**: Context-aware LLM question formulation
 
 ## Knowledge Graph Schema
 
@@ -217,15 +346,32 @@ The system uses a flexible ontology (see `docs/ontology.md`):
 
 ## Development
 
-### Running Tests
+### Running Tests & Benchmarks
 
 ```bash
-# Run all tests
+# Run all unit tests
 pytest
 
 # Run with coverage
 pytest --cov=vegeta
+
+# Run comprehensive benchmark suite
+python -m vegeta.interfaces.cli benchmark --type full --verbose --save
+
+# Run quick validation benchmark
+python -m vegeta.interfaces.cli benchmark --type quick
+
+# Using console scripts
+vegeta-benchmark --type quick --verbose
 ```
+
+### Benchmark Types
+
+- **minimal**: Ultra-fast validation (1 test case, 30 seconds)
+- **quick**: Fast validation (2 cases per category, 5-10 minutes)
+- **single**: All single-turn tests (21 cases, 15-25 minutes)
+- **multi**: All multi-turn tests (12 conversations, 20-30 minutes)
+- **full**: Complete test suite (33 total cases, 30-45 minutes)
 
 ### Adding New Domains
 
@@ -233,6 +379,7 @@ pytest --cov=vegeta
 2. Add domain-specific entities to seed data
 3. Create domain checklists for task types
 4. Update extraction patterns if needed
+5. Run benchmarks to validate new domain performance
 
 ## Examples
 
@@ -278,12 +425,33 @@ system = VegetaSystem(Config())
 "
 ```
 
+## Current Development Phase
+
+VEGETA is currently in **Phase 2: Memory-Augmented Intelligence** of its roadmap:
+
+### ✅ **Phase 1: Core Predictive Coding** - COMPLETED
+- Complete predictive coding pipeline operational
+- Bayesian active inference with EIG-based decisions
+- Comprehensive benchmarking and evaluation
+
+### 🟡 **Phase 2: Memory-Augmented Intelligence** - CURRENT
+- **MOMDP Formalization**: Converting to formal Mixed Observability Markov Decision Process
+- Episodic case bank implementation
+- External search and tool integration
+- Sleep-like graph maintenance
+- Multi-agent collaborative intelligence
+
+### 🟢 **Phase 3: Advanced Capabilities** - FUTURE
+- Neuroplasticity-inspired meta-learning
+- Real-time adaptation
+- Federated learning across instances
+
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Add tests for new functionality
-4. Ensure all tests pass
+4. Run benchmarks to ensure performance
 5. Submit a pull request
 
 ## License
@@ -296,9 +464,9 @@ If you use VEGETA in your research, please cite:
 
 ```bibtex
 @misc{vegeta2024,
-  title={VEGETA: Bayesian Active Inference for Interactive Knowledge Discovery},
+  title={VEGETA: Variational Evidence Graph, Estimating Temporal Activations},
   author={VEGETA Project},
   year={2024},
-  url={https://github.com/your-org/vegeta}
+  url={https://github.com/waitThatShouldntWork/vegeta}
 }
 ```

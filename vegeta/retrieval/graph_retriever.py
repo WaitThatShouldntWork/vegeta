@@ -59,7 +59,7 @@ class GraphRetriever:
             linked_entity_ids = self._link_entities_to_graph(entities)
             
             # Determine active checklist and target labels
-            active_checklist_name, target_labels = self._get_active_checklist_and_target_labels()
+            active_checklist_name, target_labels = self._get_active_checklist_and_target_labels(observation_u)
             
             # Generate candidates based on strategy
             if target_labels:
@@ -114,10 +114,50 @@ class GraphRetriever:
         
         return linked_ids
     
-    def _get_active_checklist_and_target_labels(self) -> Tuple[Optional[str], List[str]]:
-        """Determine the active checklist and its primary target labels in a generic way."""
-        
+    def _get_active_checklist_and_target_labels(self, observation_u: Dict[str, Any]) -> Tuple[Optional[str], List[str]]:
+        """Determine the active checklist and its primary target labels in a query-aware way."""
+
         try:
+            # First, check if there's an active checklist based on query content
+            utterance = observation_u.get('u_meta', {}).get('utterance', '').lower()
+
+            # Query-aware label selection based on keywords
+            query_labels = []
+
+            # Movie/film related queries
+            if any(word in utterance for word in ['movie', 'film', 'bond', 'casino', 'skyfall', 'heat']):
+                query_labels.extend(['Film', 'Person', 'Year'])
+
+            # Music related queries
+            if any(word in utterance for word in ['music', 'rights', 'composer', 'territory', 'sync']):
+                query_labels.extend(['MusicTrack', 'Territory', 'Person'])
+
+            # Award related queries
+            if any(word in utterance for word in ['award', 'bafta', 'oscar', 'won', 'win']):
+                query_labels.extend(['Award', 'Film', 'Year'])
+
+            # Person related queries
+            if any(word in utterance for word in ['actor', 'actress', 'director', 'person']):
+                query_labels.extend(['Person', 'Film'])
+
+            # Conversational queries (name, introduction, etc.)
+            if any(word in utterance for word in ['name', 'i am', 'my name', 'hello', 'hi', 'introduce']):
+                # For conversational queries, don't target specific entity types
+                # Let the system use general retrieval or fallback to None
+                logger.debug("Conversational query detected - using general retrieval")
+                return None, []
+
+            # If we found query-specific labels, use them
+            if query_labels:
+                logger.debug(f"Query-aware labels detected: {query_labels}")
+                return None, list(set(query_labels))  # Remove duplicates
+
+            # For general queries, don't force a checklist - use general retrieval
+            logger.debug("No specific keywords detected, using general retrieval")
+            return None, ['Film', 'Person', 'MusicTrack', 'Territory', 'Award', 'Year', 'Document']
+
+            # Only use checklist-based approach for checklist-specific queries
+            # (This would be triggered by checklist-specific keywords like "verify rights", "checklist", etc.)
             # Get all checklist specs
             query = """
             MATCH (ss:SlotSpec)
@@ -129,7 +169,7 @@ class GraphRetriever:
             ORDER BY required DESC
             """
             records = self.db_manager.execute_query(query)
-            
+
             # Filter to those with expect_labels
             candidates = []
             for r in records:
@@ -142,25 +182,41 @@ class GraphRetriever:
                         "required": bool(r.get("required")),
                         "cardinality": r.get("cardinality") or "ONE"
                     })
-            
+
             if not candidates:
-                return None, []
+                # Ultimate fallback: use all common entity types
+                return None, ['Film', 'Person', 'MusicTrack', 'Territory', 'Award', 'Year', 'Document']
+
+            # For general queries that don't match specific keywords,
+            # don't automatically pick a checklist - use general retrieval
+            if not query_labels:
+                logger.debug("No query-specific keywords detected, using general retrieval")
+                return None, ['Film', 'Person', 'MusicTrack', 'Territory', 'Award', 'Year', 'Document']
+
+            # If we have query-specific labels but no perfect checklist match,
+            # still use the query-aware labels rather than forcing a checklist
+            logger.debug(f"Using query-aware target labels: {query_labels}")
+            return None, list(set(query_labels))
+
+            # Only use checklist-based approach if we have specific checklist triggers
+            # (This section should only be reached if we add checklist-specific keywords above)
 
             # Prefer required and cardinality ONE
             def sort_key(x: Dict[str, Any]):
                 return (
                     1 if x["required"] else 0,
                     1 if str(x["cardinality"]).upper() == "ONE" else 0,
-                    -len(x["expect_labels"])  # fewer labels preferred for specificity
+                    -len(x["expect_labels"]),  # fewer labels preferred for specificity
+                    x["name"]  # deterministic tiebreaker
                 )
-            
+
             candidates.sort(key=sort_key, reverse=True)
             picked = candidates[0]
             return picked["checklist_name"], picked["expect_labels"]
-            
+
         except Exception as e:
             logger.error(f"Failed to fetch checklist target labels: {e}")
-            return None, []
+            return None, ['Film', 'Person', 'MusicTrack', 'Territory', 'Award', 'Year', 'Document']
     
     def _create_empty_context(self, observation_u: Dict[str, Any]) -> Dict[str, Any]:
         """Create empty retrieval context when no anchors found"""

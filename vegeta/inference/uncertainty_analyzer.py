@@ -4,7 +4,7 @@ Uncertainty analysis and decision making using Expected Information Gain
 
 import logging
 import numpy as np
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from ..utils.llm_client import LLMClient
 from ..core.config import Config
@@ -21,32 +21,195 @@ class UncertaintyAnalyzer:
         self.config = config
         self.defaults = config.system_defaults
     
-    def make_decision(self, posteriors: Dict[str, Any], 
+    def make_decision(self, posteriors: Dict[str, Any],
                      candidates: List[Dict[str, Any]],
                      observation_u: Dict[str, Any],
                      retrieval_context: Dict[str, Any],
                      session_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Decide between ANSWER, ASK, or SEARCH based on uncertainty and lookahead EIG"""
-        
+        """Decide between ANSWER, ASK, or SEARCH based on uncertainty and procedure-driven logic"""
+
+        # CRITICAL: Check for procedure-driven checklists FIRST
+        # This prevents the system from falling back to clarification for procedure queries
+        procedure_state = session_context.get('procedure_state', {})
+        checklist_posterior = posteriors.get('checklist', {})
+
+        if procedure_state.get('active_checklist') or self._is_procedure_checklist_top(checklist_posterior):
+            return self._handle_procedure_driven_decision(posteriors, session_context)
+
+        # Fall back to standard decision logic for non-procedure queries
+        return self._handle_standard_decision(posteriors, candidates, observation_u, retrieval_context, session_context)
+
+    def _is_procedure_checklist_top(self, checklist_posterior: Dict[str, float]) -> bool:
+        """Check if top checklist is procedure-driven (not AI-driven)"""
+
+        if not checklist_posterior:
+            return False
+
+        top_checklist = max(checklist_posterior.items(), key=lambda x: x[1])[0]
+
+        # Define which checklists are procedure-driven vs AI-driven
+        procedure_driven_checklists = {'VerifyMusicRights'}  # Add more as needed
+
+        return top_checklist in procedure_driven_checklists
+
+    def _handle_procedure_driven_decision(self, posteriors: Dict[str, Any],
+                                        session_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle decision-making for procedure-driven checklists"""
+
+        procedure_state = session_context.get('procedure_state', {})
+        checklist_posterior = posteriors.get('checklist', {})
+        step_posterior = posteriors.get('step', {})
+        slot_priors = posteriors.get('slot', {})
+
+        # Determine active checklist
+        if procedure_state.get('active_checklist'):
+            active_checklist = procedure_state['active_checklist']
+        elif checklist_posterior:
+            active_checklist = max(checklist_posterior.items(), key=lambda x: x[1])[0]
+        else:
+            return self._create_fallback_decision()
+
+        # Get completed slots
+        completed_slots = procedure_state.get('completed_slots', [])
+
+        # Find missing required slots
+        missing_slots = self._get_missing_required_slots(active_checklist, completed_slots, slot_priors)
+
+        if not missing_slots:
+            # All required slots complete - procedure finished
+            return {
+                'action': 'ANSWER',
+                'target': f"{active_checklist}_complete",
+                'confidence': 1.0,
+                'margin': 1.0,
+                'reasoning': f"Procedure {active_checklist} completed successfully",
+                'entropy': 0.0
+            }
+
+        # Ask for the first missing slot (procedure-driven, not AI choice)
+        next_slot = missing_slots[0]
+        slot_confidence = self._calculate_slot_confidence(slot_priors.get(next_slot, {}))
+
+        return {
+            'action': 'ASK',
+            'target': next_slot,
+            'confidence': slot_confidence,
+            'margin': 0.5,  # Fixed margin for procedure steps
+            'reasoning': f"Procedure {active_checklist} requires {next_slot} (step {len(completed_slots) + 1}/{len(completed_slots) + len(missing_slots)})",
+            'entropy': 1.0 if slot_confidence < 0.5 else 0.5
+        }
+
+    def _get_missing_required_slots(self, checklist_name: str,
+                                   completed_slots: List[str],
+                                   slot_priors: Dict[str, Dict[str, float]]) -> List[str]:
+        """Get required slots that are still missing"""
+
+        missing_slots = []
+
+        try:
+            # Query SlotSpecs for this checklist
+            slot_specs = self.config.db_manager.execute_query("""
+                MATCH (c:Checklist {name: $checklist_name})-[:REQUIRES]->(ss:SlotSpec)
+                WHERE ss.required = true
+                RETURN ss.name as slot_name
+                ORDER BY ss.name
+            """, {"checklist_name": checklist_name})
+
+            for spec in slot_specs:
+                slot_name = spec['slot_name']
+                if slot_name not in completed_slots:
+                    # Check if we have a non-unknown value with reasonable confidence
+                    slot_prior = slot_priors.get(slot_name, {})
+                    if not self._has_confident_slot_value(slot_prior):
+                        missing_slots.append(slot_name)
+
+        except Exception as e:
+            logger.warning(f"Error getting missing slots for {checklist_name}: {e}")
+
+        return missing_slots
+
+    def _has_confident_slot_value(self, slot_prior: Dict[str, float]) -> bool:
+        """Check if slot has a confident (non-unknown) value"""
+
+        if not slot_prior:
+            return False
+
+        # Remove unknown and find best alternative
+        known_values = {k: v for k, v in slot_prior.items() if k != 'unknown'}
+
+        if not known_values:
+            return False
+
+        best_prob = max(known_values.values())
+        return best_prob > 0.7  # Confidence threshold for "has value"
+
+    def _calculate_slot_confidence(self, slot_prior: Dict[str, float]) -> float:
+        """Calculate overall confidence for a slot"""
+
+        if not slot_prior:
+            return 0.0
+
+        # Confidence is 1 - probability of unknown
+        unknown_prob = slot_prior.get('unknown', 0.0)
+        return 1.0 - unknown_prob
+
+    def _handle_standard_decision(self, posteriors: Dict[str, Any],
+                                candidates: List[Dict[str, Any]],
+                                observation_u: Dict[str, Any],
+                                retrieval_context: Dict[str, Any],
+                                session_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle standard (non-procedure) decision making"""
+
+        # CRITICAL: Check if this is a response to a previous question
+        conversation_response = self._check_conversation_context(observation_u, session_context)
+        if conversation_response:
+            return conversation_response
+
         # Get top candidate and confidence metrics
         if not posteriors.get('subgraph'):
             return self._create_fallback_decision()
-        
+
         top_prob = max(posteriors['subgraph'].values())
         top_subgraph_id = max(posteriors['subgraph'].items(), key=lambda x: x[1])[0]
         top_candidate = next(c for c in candidates if c['id'] == top_subgraph_id)
-        
+
         second_prob = sorted(posteriors['subgraph'].values(), reverse=True)[1] if len(posteriors['subgraph']) > 1 else 0.0
         margin = top_prob - second_prob
-        
-        # Calculate entropies
+
+                # Calculate entropies
         entropies = self._calculate_entropies(posteriors)
-        
-        # LLM-BASED FAST PATH: Check for immediate clarification needs
+
+        # CRITICAL: Check for procedure-driven checklists FIRST
+        # This must happen before immediate clarification to avoid bypassing procedures
+        procedure_state = session_context.get('procedure_state', {})
+        checklist_posterior = posteriors.get('checklist', {})
+
+        if procedure_state.get('active_checklist') or self._is_procedure_checklist_top(checklist_posterior):
+            return self._handle_procedure_driven_decision(posteriors, session_context)
+
+        # LLM-BASED FAST PATH: Check for immediate clarification needs (only for non-procedure queries)
         extraction = observation_u.get('u_meta', {}).get('extraction', {})
         query_analysis = extraction.get('query_analysis', {})
-        
-        if query_analysis.get('immediate_clarification_needed', False):
+
+        # Only trigger immediate clarification if we don't have strong procedure-driven priors
+        # Check if any procedure-driven checklist has significant probability
+        procedure_driven_checklists = {'VerifyMusicRights'}
+
+        has_procedure_potential = any(
+            name in procedure_driven_checklists and checklist_posterior.get(name, 0) > 0.3
+            for name in checklist_posterior.keys()
+        ) if checklist_posterior else False
+
+        # Only trigger immediate clarification if:
+        # 1. No procedure-driven checklist has significant probability (>0.3)
+        # 2. The query is truly vague AND needs clarification
+        should_clarify_immediately = (
+            not has_procedure_potential and
+            query_analysis.get('immediate_clarification_needed', False) and
+            query_analysis.get('clarity') in ['vague', 'extremely_vague']
+        )
+
+        if should_clarify_immediately:
             return self._handle_immediate_clarification(query_analysis)
         
         # EARLY ROUTING: Intent-based routing for recommendations
@@ -89,7 +252,110 @@ class UncertaintyAnalyzer:
                 entropies[var_name] = 0.0
         
         return entropies
-    
+
+    def _check_conversation_context(self, observation_u: Dict[str, Any],
+                                  session_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Check if current input is a response to a previous question.
+        This enables proper multi-turn conversation flow using Bayesian inference.
+        """
+        try:
+            current_utterance = (observation_u.get('u_meta', {}).get('utterance') or '').strip().lower()
+            recent_turns = session_context.get('recent_turns', []) if session_context else []
+
+            if not recent_turns:
+                logger.debug("No recent turns available for conversation context")
+                return None
+
+            # Get the most recent turn (what we just asked)
+            previous_turn = recent_turns[-1]
+            if not previous_turn:
+                logger.debug("Previous turn is None")
+                return None
+
+            previous_question = (previous_turn.get('system_response') or '').strip()
+            previous_target = previous_turn.get('target') or ''
+
+            logger.debug(f"Checking conversation context: previous='{previous_question}', current='{current_utterance}'")
+            logger.debug(f"Previous turn keys: {list(previous_turn.keys()) if previous_turn else 'None'}")
+            logger.debug(f"Previous target: '{previous_target}'")
+
+            # Handle confirmation responses using Bayesian belief update
+            if self._is_confirmation(current_utterance):
+                return self._handle_bayesian_confirmation(previous_question, previous_target, observation_u)
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Error checking conversation context: {e}")
+            logger.debug(f"Session context type: {type(session_context)}")
+            logger.debug(f"Observation_u type: {type(observation_u)}")
+            return None
+
+    def _is_confirmation(self, utterance: str) -> bool:
+        """Check if utterance is a confirmation (yes, yeah, correct, etc.)"""
+        confirmations = ['yes', 'yeah', 'yep', 'correct', 'right', 'true', 'sure', 'definitely', 'absolutely', 'exactly']
+        return utterance in confirmations
+
+    def _handle_bayesian_confirmation(self, previous_question: str, previous_target: str,
+                                    observation_u: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle confirmation using proper Bayesian belief updates.
+        This maintains the integrity of our graph-based inference approach.
+        """
+        try:
+            logger.info(f"User confirmed: {previous_target} - updating belief state")
+
+            # Instead of hardcoding responses, we enhance the observation to bias toward the confirmed entity
+            # This allows the normal graph traversal and inference to naturally discover the information
+
+            enhanced_observation = observation_u.copy()
+            enhanced_meta = enhanced_observation.get('u_meta', {}).copy()
+
+            # Add confirmation context that will influence downstream inference
+            enhanced_meta['confirmation_context'] = {
+                'confirmed_entity': previous_target,
+                'confirmation_strength': 0.95,  # Very strong confirmation signal
+                'previous_question': previous_question,
+                'inference_hint': f"User confirmed they mean {previous_target} - strongly bias toward this entity in graph search"
+            }
+
+            # Enhance the utterance to include confirmation context
+            original_utterance = enhanced_meta.get('utterance', '')
+            enhanced_meta['utterance'] = f"{original_utterance} [CONFIRMED_CONTEXT: {previous_target}]"
+
+            # Add semantic bias (this would ideally update embeddings, but we use metadata for now)
+            enhanced_observation['u_meta'] = enhanced_meta
+            enhanced_observation['confirmation_bias'] = {
+                'target_entity': previous_target,
+                'bias_strength': 0.95,
+                'reason': 'User confirmation of previous clarification'
+            }
+
+            # The system will continue with normal inference but with strong bias toward confirmed entity
+            # This allows graph-based discovery while respecting user confirmation
+            return {
+                'action': 'CONTINUE_INFERENCE',
+                'target': previous_target,
+                'confidence': 0.95,
+                'margin': 0.9,
+                'reasoning': f'User confirmed {previous_target} - proceeding with biased inference toward this entity',
+                'enhanced_observation': enhanced_observation,
+                'confirmation_bias': previous_target
+            }
+
+        except Exception as e:
+            logger.error(f"Error handling Bayesian confirmation: {e}")
+            # Fallback to safe behavior
+            return {
+                'action': 'ASK',
+                'target': 'clarification',
+                'confidence': 0.0,
+                'margin': 0.0,
+                'reasoning': f'Confirmation handling failed: {e}',
+                'fallback': True
+            }
+
     def _handle_immediate_clarification(self, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Handle LLM-identified immediate clarification needs"""
         

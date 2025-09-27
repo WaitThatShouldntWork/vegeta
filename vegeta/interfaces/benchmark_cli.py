@@ -39,7 +39,7 @@ def run_benchmark(config_path: Optional[str] = None,
         system = VegetaSystem(config)
         
         # Validate connections
-        if not system.validate_connections():
+        if not system._validate_connections():
             logger.error("❌ System validation failed")
             return False
         
@@ -50,7 +50,7 @@ def run_benchmark(config_path: Optional[str] = None,
         
         # Run appropriate benchmark
         if benchmark_type == "quick":
-            logger.info("🏃 Running quick benchmark (2 cases per category)")
+            logger.info("🏃 Running quick benchmark (single + multi-turn)")
             results = runner.run_quick_test(num_cases_per_category=2)
         elif benchmark_type == "single":
             logger.info("📝 Running single-turn benchmark")
@@ -69,25 +69,26 @@ def run_benchmark(config_path: Optional[str] = None,
         else:
             logger.error(f"❌ Unknown benchmark type: {benchmark_type}")
             return False
-        
+
         # Generate report
         logger.info("📊 Generating evaluation report")
-        if benchmark_type == "full":
-            # Generate separate reports for single and multi-turn
-            single_report = runner.generate_report(single_results)
-            multi_report = runner.generate_report(multi_results)
-            report = {
-                "single_turn_report": single_report,
-                "multi_turn_report": multi_report,
-                "combined_summary": {
-                    "total_single_cases": single_report.get("total_cases", 0),
-                    "total_multi_conversations": multi_report.get("total_cases", 0),
-                    "single_turn_accuracy": single_report.get("summary_metrics", {}).get("decision_accuracy", 0),
-                    "multi_turn_resolution_rate": sum(1 for cat in multi_report.get("detailed_results", {}).values() 
-                                                    for conv in cat if conv.get("conversation_resolved", False)) / 
-                                                 max(multi_report.get("total_cases", 1), 1)
+        if benchmark_type in ["full", "quick"]:
+            # Handle combined single + multi-turn results
+            if "single_turn" in results and "multi_turn" in results:
+                single_report = runner.generate_report(results["single_turn"])
+                multi_report = runner.generate_report(results["multi_turn"])
+                report = {
+                    "single_turn_report": single_report,
+                    "multi_turn_report": multi_report,
+                    "combined_summary": {
+                        "total_single_cases": single_report.get("total_cases", 0),
+                        "total_multi_conversations": multi_report.get("total_cases", 0),
+                        "single_turn_accuracy": single_report.get("summary_metrics", {}).get("decision_accuracy", 0),
+                        "multi_turn_resolution_rate": sum(1 for cat in multi_report.get("detailed_results", {}).values()
+                                                        for conv in cat if conv.get("conversation_resolved", False)) /
+                                                     max(multi_report.get("total_cases", 1), 1)
+                    }
                 }
-            }
         else:
             report = runner.generate_report(results)
         

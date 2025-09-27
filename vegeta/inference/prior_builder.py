@@ -23,38 +23,560 @@ class PriorBuilder:
         self.config = config
         self.query_analyzer = QueryAnalyzer(llm_client, config)
     
-    def build_priors(self, observation_u: Dict[str, Any], 
+    def build_priors(self, observation_u: Dict[str, Any],
                     session_context: Dict[str, Any],
                     retrieval_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Build all priors for the current turn"""
-        
+        """Build all priors for the current turn using Bayesian filtering from previous beliefs"""
+
+        # CRITICAL: Get last observation for Bayesian filtering (following Langgraph pattern)
+        last_observation_u = session_context.get('last_observation_u', {})
+
         # Get basic dialogue act classification
         utterance = observation_u.get('u_meta', {}).get('utterance', '')
         dialogue_act_prior = self.query_analyzer.classify_dialogue_act_llm(utterance)
-        
-        # Build checklist prior
-        checklist_prior = self._build_checklist_prior(observation_u, dialogue_act_prior)
-        
-        # Build goal prior using LLM analysis
+
+        # Get previous posterior for Bayesian filtering (belief carryover)
+        previous_posterior = session_context.get('belief_state', {}).get('posterior', {})
+        inertia_rho = session_context.get('inertia_rho', 0.7)  # Belief carryover strength
+
+        # CRITICAL: Apply last observation influence (following theory from attempt1TextOnly.py lines 663-711)
+        # The last observation u should influence current priors through Bayesian filtering
+        if last_observation_u:
+            observation_u = self._incorporate_last_observation(observation_u, last_observation_u)
+
+        # Build checklist prior with belief carryover
+        checklist_prior = self._build_checklist_prior_with_carryover(
+            observation_u, dialogue_act_prior, previous_posterior, inertia_rho
+        )
+
+        # Build goal prior using LLM analysis + belief carryover
         extraction = observation_u.get('u_meta', {}).get('extraction', {})
         goal_prior = self.query_analyzer.classify_user_intent_llm(
             utterance, dialogue_act_prior, extraction
         )
-        
-        # Build subgraph prior
+        goal_prior = self._apply_belief_carryover(goal_prior, previous_posterior.get('goal', {}), inertia_rho)
+
+        # Build subgraph prior with belief carryover
         candidates = retrieval_context.get('candidates', [])
-        subgraph_prior = self._build_subgraph_prior(candidates)
-        
+        subgraph_prior = self._build_subgraph_prior_with_carryover(
+            candidates, previous_posterior, inertia_rho
+        )
+
+        # Build step prior (MISSING FROM CURRENT SYSTEM!)
+        step_prior = self._build_step_prior(checklist_prior, goal_prior, session_context)
+
+        # Build slot priors (MISSING FROM CURRENT SYSTEM!)
+        slot_priors = self._build_slot_priors(candidates, step_prior, checklist_prior)
+
         # Build novelty prior
         novelty_prior = self._build_novelty_prior(retrieval_context['anchors'], observation_u)
-        
+
+        # Check if we need to initialize procedure state for procedure-driven checklists
+        current_procedure_state = session_context.get('procedure_state', {})
+
+        # If VerifyMusicRights becomes the top checklist and no procedure is active, initialize it
+        top_checklist = max(checklist_prior.items(), key=lambda x: x[1])[0] if checklist_prior else None
+        if (top_checklist == 'VerifyMusicRights' and
+            not current_procedure_state.get('active_checklist')):
+            logger.info(f"Initializing VerifyMusicRights procedure for session {session_context.get('session_id', 'unknown')}")
+
         return {
             'checklist': checklist_prior,
             'goal': goal_prior,
             'subgraph': subgraph_prior,
+            'step': step_prior,
+            'slot': slot_priors,
             'dialogue_act': dialogue_act_prior,
             'novelty': novelty_prior
         }
+
+    def _build_checklist_prior_with_carryover(self, observation_u: Dict[str, Any],
+                                             dialogue_act_prior: Dict[str, float],
+                                             previous_posterior: Dict[str, Any],
+                                             inertia_rho: float) -> Dict[str, float]:
+        """Build checklist prior using Bayesian filtering from previous beliefs"""
+
+        # Start with base checklist prior
+        base_prior = self._build_checklist_prior(observation_u, dialogue_act_prior)
+
+        # Apply belief carryover from previous posterior
+        previous_checklist = previous_posterior.get('checklist', {})
+
+        if previous_checklist:
+            # Bayesian filtering: p_{t+1} ∝ (q_t)^ρ × base_prior
+            filtered_prior = {}
+            for checklist_name in base_prior:
+                previous_prob = previous_checklist.get(checklist_name, 0.01)  # Small floor
+                carryover_weight = previous_prob ** inertia_rho
+                filtered_prior[checklist_name] = carryover_weight * base_prior[checklist_name]
+
+            # Renormalize
+            total = sum(filtered_prior.values())
+            if total > 0:
+                filtered_prior = {k: v/total for k, v in filtered_prior.items()}
+            return filtered_prior
+
+        return base_prior
+
+    def _apply_belief_carryover(self, current_prior: Dict[str, float],
+                               previous_posterior: Dict[str, float],
+                               inertia_rho: float) -> Dict[str, float]:
+        """Apply belief carryover to any prior distribution"""
+
+        if not previous_posterior:
+            return current_prior
+
+        # Bayesian filtering: p_{t+1} ∝ (q_t)^ρ × current_prior
+        filtered_prior = {}
+        for key in current_prior:
+            previous_prob = previous_posterior.get(key, 0.01)
+            carryover_weight = previous_prob ** inertia_rho
+            filtered_prior[key] = carryover_weight * current_prior[key]
+
+        # Renormalize
+        total = sum(filtered_prior.values())
+        if total > 0:
+            filtered_prior = {k: v/total for k, v in filtered_prior.items()}
+
+        return filtered_prior
+
+    def _build_subgraph_prior_with_carryover(self, candidates: List[Dict[str, Any]],
+                                            previous_posterior: Dict[str, Any],
+                                            inertia_rho: float) -> Dict[str, float]:
+        """Build subgraph prior with belief carryover and recency/simplicity bonuses"""
+
+        # Start with base subgraph prior
+        base_prior = self._build_subgraph_prior(candidates)
+
+        # Apply belief carryover from previous subgraph posterior
+        previous_subgraph = previous_posterior.get('subgraph', {})
+
+        if previous_subgraph:
+            filtered_prior = {}
+            for candidate_id in base_prior:
+                previous_prob = previous_subgraph.get(candidate_id, 0.01)
+                carryover_weight = previous_prob ** inertia_rho
+
+                # Add recency bonus for recently discussed subgraphs
+                candidate = next((c for c in candidates if c['id'] == candidate_id), {})
+                recency_bonus = 1.0
+                simplicity_bonus = 1.0
+
+                # Simplicity bonus: prefer smaller subgraphs
+                subgraph_size = candidate.get('subgraph_size', 10)
+                simplicity_bonus = 1.0 / (1.0 + subgraph_size / 10.0)  # Smaller is better
+
+                filtered_prior[candidate_id] = carryover_weight * base_prior[candidate_id] * recency_bonus * simplicity_bonus
+
+            # Renormalize
+            total = sum(filtered_prior.values())
+            if total > 0:
+                filtered_prior = {k: v/total for k, v in filtered_prior.items()}
+            return filtered_prior
+
+        return base_prior
+
+    def _build_step_prior(self, checklist_prior: Dict[str, float],
+                         goal_prior: Dict[str, float],
+                         session_context: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Build prior over procedure steps p(z_step | z_checklist, z_goal, history)
+
+        Following the theory from attemp1TextOnly.py:
+        - Model steps explicitly: (:Process)-[:HAS_STEP]->(:Step) with preconditions
+        - Signals: Recently satisfied preconditions, last answered slot, typical step orders
+        - Goal ↔ step compatibility
+        - Procedure-agnostic fallback for non-procedural checklists
+        """
+
+        procedure_state = session_context.get('procedure_state', {})
+        recent_turns = session_context.get('recent_turns', [])
+        belief_state = session_context.get('belief_state', {})
+
+        # Get top checklist and goal
+        top_checklist = max(checklist_prior.items(), key=lambda x: x[1])[0] if checklist_prior else None
+        top_goal = max(goal_prior.items(), key=lambda x: x[1])[0] if goal_prior else None
+
+        if procedure_state.get('active_checklist') and procedure_state['active_checklist'] == top_checklist:
+            # We're in an active procedure - determine current step
+            checklist_name = procedure_state['active_checklist']
+            completed_slots = procedure_state.get('completed_slots', [])
+            current_step = procedure_state.get('current_step', 'initial')
+
+            try:
+                # Query checklist SlotSpecs to understand procedure requirements
+                slot_specs = self.db_manager.execute_query("""
+                    MATCH (c:Checklist {name: $checklist_name})-[:REQUIRES]->(ss:SlotSpec)
+                    RETURN ss.name as slot_name, ss.required as required,
+                           ss.expect_labels as expect_labels
+                    ORDER BY ss.name
+                """, {"checklist_name": checklist_name})
+
+                # Determine which slots are missing and their priority
+                missing_required = []
+                missing_optional = []
+
+                for spec in slot_specs:
+                    slot_name = spec['slot_name']
+                    if slot_name not in completed_slots:
+                        if spec['required']:
+                            missing_required.append({
+                                'name': slot_name,
+                                'labels': spec['expect_labels']
+                            })
+                        else:
+                            missing_optional.append(slot_name)
+
+                # Build step prior based on procedure logic
+                step_prior = {}
+
+                if not missing_required:
+                    # All required slots complete - ready for final verification
+                    step_prior["procedure_complete"] = 0.9
+                    step_prior["final_verification"] = 0.1
+                elif current_step == "initial" or not current_step.startswith("collect_"):
+                    # Starting procedure - begin with first missing required slot
+                    if missing_required:
+                        first_slot = missing_required[0]['name']
+                        step_prior[f"collect_{first_slot}"] = 0.8
+                        step_prior["procedure_complete"] = 0.2
+                else:
+                    # Continue with current step or move to next
+                    current_slot = current_step.replace("collect_", "")
+                    if current_slot in [s['name'] for s in missing_required]:
+                        # Stay on current step with high probability
+                        step_prior[current_step] = 0.7
+                        # Small probability of moving to next step
+                        current_idx = next(i for i, s in enumerate(missing_required)
+                                         if s['name'] == current_slot)
+                        if current_idx + 1 < len(missing_required):
+                            next_slot = missing_required[current_idx + 1]['name']
+                            step_prior[f"collect_{next_slot}"] = 0.2
+                        step_prior["procedure_complete"] = 0.1
+                    else:
+                        # Current step completed, move to next
+                        if missing_required:
+                            next_slot = missing_required[0]['name']
+                            step_prior[f"collect_{next_slot}"] = 0.8
+                            step_prior["procedure_complete"] = 0.2
+
+                # Apply goal compatibility (theory: goal ↔ step compatibility)
+                if top_goal:
+                    goal_step_compatibility = self._compute_goal_step_compatibility(
+                        top_goal, step_prior, checklist_name
+                    )
+                    step_prior = {step: prob * goal_step_compatibility.get(step, 1.0)
+                                for step, prob in step_prior.items()}
+
+                # Normalize
+                total = sum(step_prior.values())
+                if total > 0:
+                    step_prior = {step: prob/total for step, prob in step_prior.items()}
+
+            except Exception as e:
+                logger.warning(f"Error building procedure step prior: {e}")
+                step_prior = {"unknown_procedure_step": 1.0}
+        else:
+            # No active procedure or checklist changed
+            if top_checklist == "VerifyMusicRights":
+                # Initialize new procedure
+                step_prior = {"collect_film": 0.8, "procedure_complete": 0.2}
+            else:
+                # Non-procedural checklist or fallback
+                step_prior = {"no_procedure": 1.0}
+
+        logger.info(f"🎯 Built step prior: {step_prior}")
+        return step_prior
+
+    def _compute_goal_step_compatibility(self, goal: str, step_prior: Dict[str, float],
+                                       checklist_name: str) -> Dict[str, float]:
+        """Compute compatibility between goal and procedure steps"""
+
+        compatibility = {}
+
+        for step in step_prior.keys():
+            if step == "procedure_complete":
+                # Final steps always compatible with verification goals
+                if "verify" in goal.lower() or "check" in goal.lower():
+                    compatibility[step] = 1.2
+                else:
+                    compatibility[step] = 1.0
+            elif step.startswith("collect_"):
+                slot_name = step.replace("collect_", "")
+                # Information gathering steps compatible with identify/recommend goals
+                if goal in ["identify", "recommend", "find"]:
+                    compatibility[step] = 1.1
+                else:
+                    compatibility[step] = 1.0
+            else:
+                compatibility[step] = 1.0
+
+        return compatibility
+
+    def _incorporate_last_observation(self, current_u: Dict[str, Any],
+                                    last_u: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Incorporate last observation into current observation for Bayesian filtering
+
+        Following the theory from attempt1TextOnly.py lines 663-711:
+        "Next priors = tempered carryover × base priors × recency/context"
+        "p_{t+1} ∝ (q_t)^ρ × base_prior × context_boost"
+
+        This implements the Bayesian filtering where the last observation u influences
+        the current turn's priors through context and recency.
+        """
+        import numpy as np
+
+        # Create a copy to modify
+        enhanced_u = current_u.copy()
+
+        # Get current and last utterance texts
+        current_utterance = current_u.get('u_meta', {}).get('utterance', '')
+        last_utterance = last_u.get('u_meta', {}).get('utterance', '')
+
+        # Calculate utterance similarity (simple but effective)
+        current_words = set(current_utterance.lower().split())
+        last_words = set(last_utterance.lower().split())
+
+        if current_words and last_words:
+            # Jaccard similarity between utterances
+            utterance_similarity = len(current_words & last_words) / len(current_words | last_words)
+        else:
+            utterance_similarity = 0.0
+
+        # Extract entities from both observations
+        current_entities = current_u.get('u_meta', {}).get('extraction', {}).get('entities', [])
+        last_entities = last_u.get('u_meta', {}).get('extraction', {}).get('entities', [])
+
+        # Check for entity continuity (same entities mentioned)
+        current_entity_names = set()
+        last_entity_names = set()
+
+        for entity in current_entities:
+            if isinstance(entity, dict):
+                name = entity.get('normalized') or entity.get('surface', '')
+                if name:
+                    current_entity_names.add(name.lower())
+
+        for entity in last_entities:
+            if isinstance(entity, dict):
+                name = entity.get('normalized') or entity.get('surface', '')
+                if name:
+                    last_entity_names.add(name.lower())
+
+        entity_overlap = len(current_entity_names & last_entity_names)
+        entity_continuity = entity_overlap / max(len(current_entity_names | last_entity_names), 1)
+
+        # Calculate context boost based on similarity and continuity
+        # Following theory: higher similarity = stronger context influence
+        context_boost = 0.3 + 0.4 * utterance_similarity + 0.3 * entity_continuity
+        context_boost = min(context_boost, 0.9)  # Cap at 0.9
+
+        # Enhance current observation with context from last observation
+        enhanced_meta = enhanced_u.get('u_meta', {}).copy()
+
+        # Add context information
+        enhanced_meta['context_from_last'] = {
+            'utterance_similarity': utterance_similarity,
+            'entity_continuity': entity_continuity,
+            'context_boost': context_boost,
+            'last_utterance': last_utterance,
+            'shared_entities': list(current_entity_names & last_entity_names)
+        }
+
+        # Boost term matching if entities are shared
+        if entity_continuity > 0.5:
+            current_terms = current_u.get('u_terms_set', set())
+            last_terms = last_u.get('u_terms_set', set())
+
+            # Add last turn's terms with reduced weight to current terms
+            shared_terms = current_terms & last_terms
+            if shared_terms:
+                enhanced_meta['context_boost_terms'] = list(shared_terms)
+                logger.debug(f"Context boost: shared terms {shared_terms} with boost {context_boost}")
+
+        # Enhance semantic embedding if available (weighted combination)
+        current_sem = current_u.get('u_sem')
+        last_sem = last_u.get('u_sem')
+
+        if current_sem is not None and last_sem is not None:
+            # Weighted combination: more weight on current, but influenced by last
+            weight_current = 0.7 + 0.2 * context_boost  # 0.7-0.9
+            weight_last = 0.3 - 0.2 * context_boost     # 0.1-0.3
+
+            # Simple vector combination (assuming same dimensionality)
+            try:
+                combined_sem = np.array(current_sem) * weight_current + np.array(last_sem) * weight_last
+                # L2 normalize
+                combined_sem = combined_sem / np.linalg.norm(combined_sem)
+                enhanced_u['u_sem'] = combined_sem.tolist()
+                enhanced_meta['semantic_context_boost'] = context_boost
+            except Exception as e:
+                logger.debug(f"Could not combine semantic embeddings: {e}")
+
+        enhanced_u['u_meta'] = enhanced_meta
+
+        logger.debug(f"Enhanced observation with context boost: {context_boost:.3f}")
+        return enhanced_u
+
+    def _build_slot_priors(self, candidates: List[Dict[str, Any]],
+                          step_prior: Dict[str, float],
+                          checklist_prior: Dict[str, float]) -> Dict[str, Dict[str, float]]:
+        """Build initial slot priors based on candidate neighborhoods (MISSING FROM CURRENT SYSTEM!)"""
+
+        # This is another CRITICAL missing piece
+        # We need initial guesses for each required slot based on what's available in candidates
+
+        slot_priors = {}
+
+        # Get top checklist to know which slots we need
+        top_checklist = max(checklist_prior.items(), key=lambda x: x[1])[0] if checklist_prior else None
+
+        if not top_checklist:
+            return {"unknown": {"unknown": 1.0}}
+
+        try:
+            # Query SlotSpecs for this checklist
+            slot_specs = self.db_manager.execute_query("""
+                MATCH (c:Checklist {name: $checklist_name})-[:REQUIRES]->(ss:SlotSpec)
+                RETURN ss.name as slot_name, ss.expect_labels as expect_labels,
+                       ss.required as required, ss.cardinality as cardinality
+                ORDER BY ss.required DESC, ss.name
+            """, {"checklist_name": top_checklist})
+
+            # Get current step to prioritize relevant slots
+            current_step = max(step_prior.items(), key=lambda x: x[1])[0] if step_prior else None
+            step_focus_slot = None
+            if current_step and current_step.startswith("collect_"):
+                step_focus_slot = current_step.replace("collect_", "")
+
+            for spec in slot_specs:
+                slot_name = spec['slot_name']
+                expect_labels = spec.get('expect_labels', [])
+                required = spec.get('required', False)
+                cardinality = spec.get('cardinality', 'ONE')
+
+                # Build slot prior with sophisticated logic
+                slot_prior = self._build_single_slot_prior(
+                    slot_name, expect_labels, required, cardinality,
+                    candidates, step_focus_slot, current_step
+                )
+
+                slot_priors[slot_name] = slot_prior
+
+        except Exception as e:
+            logger.warning(f"Error building slot priors: {e}")
+            slot_priors = {"unknown": {"unknown": 1.0}}
+
+        logger.debug(f"Built slot priors for {len(slot_priors)} slots")
+        return slot_priors
+
+    def _build_single_slot_prior(self, slot_name: str, expect_labels: List[str],
+                               required: bool, cardinality: str,
+                               candidates: List[Dict[str, Any]],
+                               step_focus_slot: str = None,
+                               current_step: str = None) -> Dict[str, float]:
+        """
+        Build prior for a single slot with sophisticated neighborhood analysis
+
+        Following the theory: type constraints, popularity nearby, unknown option
+        """
+
+        candidate_fillers = {}
+        base_unknown_mass = 0.7  # High uncertainty by default
+
+        # Adjust unknown mass based on context
+        if step_focus_slot == slot_name:
+            # This slot is the current focus - lower uncertainty
+            base_unknown_mass = 0.4
+        elif current_step == "procedure_complete":
+            # Procedure nearly done - lower uncertainty for remaining slots
+            base_unknown_mass = 0.5
+        elif not required:
+            # Optional slots can remain unknown
+            base_unknown_mass = 0.8
+
+        # Analyze candidate subgraphs for potential fillers
+        for candidate in candidates[:10]:  # Check top 10 candidates
+            candidate_weight = candidate.get('score', 0.1)  # Use candidate score as weight
+
+            # Look for nodes that match expected labels in this candidate
+            nodes = candidate.get('nodes', [])
+            for node in nodes:
+                node_labels = node.get('labels', [])
+                if isinstance(node_labels, str):
+                    node_labels = [node_labels]
+
+                # Check if node matches expected type
+                label_match = any(expected in node_labels for expected in expect_labels)
+
+                if label_match:
+                    node_name = node.get('name') or node.get('properties', {}).get('name') or node.get('id', 'unknown')
+                    node_id = node.get('id', node_name)
+
+                    # Boost score if this matches the current step focus
+                    weight = candidate_weight
+                    if step_focus_slot == slot_name and node_name != 'unknown':
+                        weight *= 2.0  # Double weight for step-focused slots
+
+                    if node_name not in candidate_fillers:
+                        candidate_fillers[node_name] = weight
+                    else:
+                        candidate_fillers[node_name] += weight
+
+        # Look for existing slot values in the graph (pre-filled slots)
+        try:
+            existing_slots = self.db_manager.execute_query("""
+                MATCH (sv:SlotValue {slot: $slot_name})
+                RETURN sv.value as value, count(*) as frequency
+                ORDER BY frequency DESC
+                LIMIT 5
+            """, {"slot_name": slot_name})
+
+            for slot_value in existing_slots:
+                value = slot_value['value']
+                frequency = slot_value['frequency']
+                # Add existing slot values with frequency-based weight
+                weight = min(frequency * 0.1, 0.3)  # Cap at 0.3
+                if value not in candidate_fillers:
+                    candidate_fillers[value] = weight
+                else:
+                    candidate_fillers[value] += weight
+
+        except Exception as e:
+            logger.debug(f"Could not query existing slot values: {e}")
+
+        # Apply cardinality constraints
+        if cardinality == "ONE":
+            # For single-value slots, we can be more decisive
+            if candidate_fillers:
+                base_unknown_mass = min(base_unknown_mass, 0.6)
+        elif cardinality == "MANY":
+            # For multi-value slots, unknown mass should be lower
+            base_unknown_mass = min(base_unknown_mass, 0.3)
+            # Allow multiple high-confidence fillers
+            top_fillers = sorted(candidate_fillers.items(), key=lambda x: x[1], reverse=True)
+            if len(top_fillers) > 1:
+                # Keep top 3 fillers for MANY cardinality
+                candidate_fillers = dict(top_fillers[:3])
+
+        # Normalize known candidates
+        total_known = sum(candidate_fillers.values())
+        if total_known > 0:
+            remaining_mass = 1.0 - base_unknown_mass
+            candidate_fillers = {name: (weight/total_known) * remaining_mass
+                               for name, weight in candidate_fillers.items()}
+
+        # Add unknown option
+        candidate_fillers["unknown"] = base_unknown_mass
+
+        # Ensure we have at least some mass distribution
+        total_mass = sum(candidate_fillers.values())
+        if total_mass > 0:
+            candidate_fillers = {name: mass/total_mass
+                               for name, mass in candidate_fillers.items()}
+
+        return candidate_fillers
     
     def _build_checklist_prior(self, observation_u: Dict, dialogue_act_prior: Dict) -> Dict[str, float]:
         """Build prior over checklists based on dialogue acts and extracted terms"""
@@ -76,31 +598,43 @@ class PriorBuilder:
         
         # Extract signals from observation and dialogue acts
         canonical_terms = observation_u.get('u_meta', {}).get('extraction', {}).get('canonical_terms', [])
-        
+        utterance_text = observation_u.get('u_meta', {}).get('utterance', '').lower()
+
         # Intent-driven checklist selection
         checklist_prior = {}
-        
+
         # Strong signal: "recommendation" in canonical terms
         has_recommend_term = any('recommend' in term.lower() for term in canonical_terms)
         has_similar_pattern = any(word in ' '.join(canonical_terms).lower() for word in ['similar', 'like', 'comparable'])
         request_score = dialogue_act_prior.get('request', 0.0)
-        
-        logger.info(f"Intent signals: recommend_term={has_recommend_term}, similar_pattern={has_similar_pattern}, request_score={request_score:.3f}")
-        
+
         # Apply loose heuristic matching to existing formal checklists
         for checklist in checklists:
             name = checklist['name']
             description = checklist.get('description', '').lower()
-            
-            # Heuristic matching - don't force it
-            if ('identify' in name.lower() or 'find' in description):
+
+            # Enhanced matching logic
+            if 'verifymusicrights' in name.lower():
+                # Strong match for music rights verification
+                has_music_rights_terms = any(term in utterance_text for term in ['verify', 'music', 'rights', 'copyright', 'permission'])
+                print(f"DEBUG: VerifyMusicRights - utterance: '{utterance_text}'")
+                print(f"DEBUG: VerifyMusicRights - has_music_terms: {has_music_rights_terms}")
+
+                if has_music_rights_terms:
+                    checklist_prior[name] = 0.8  # High weight for music rights verification
+                    print(f"DEBUG: ✅ VerifyMusicRights set to 0.8")
+                else:
+                    checklist_prior[name] = 0.1  # Low weight if not music rights related
+                    print(f"DEBUG: ❌ VerifyMusicRights set to 0.1")
+
+            elif ('identify' in name.lower() or 'find' in description):
                 if has_recommend_term:
                     checklist_prior[name] = 0.1  # Low weight when intent doesn't match
                 else:
                     checklist_prior[name] = 0.4  # Moderate weight
             elif 'recommend' in name.lower() or 'suggest' in description:
                 if has_recommend_term:
-                    checklist_prior[name] = 0.4  # Moderate weight 
+                    checklist_prior[name] = 0.4  # Moderate weight
                 else:
                     checklist_prior[name] = 0.1  # Low weight
             else:
@@ -108,15 +642,30 @@ class PriorBuilder:
         
         # Always prioritize flexible operation over rigid procedures
         if checklist_prior:
-            # Normalize existing checklists but keep them secondary to flexible operation
-            total_formal_mass = 0.3  # Only 30% weight to formal checklists
+            # Check if any procedure-driven checklist has strong match
+            procedure_driven_checklists = {'VerifyMusicRights'}
+            has_strong_procedure_match = any(
+                name in procedure_driven_checklists and checklist_prior.get(name, 0) > 0.5
+                for name in checklist_prior.keys()
+            )
+
+            if has_strong_procedure_match:
+                # Allow procedure-driven checklists to dominate when there's a strong match
+                total_formal_mass = 0.8  # 80% weight for procedure-driven checklists
+            else:
+                # Normal case: keep formal checklists secondary to flexible operation
+                total_formal_mass = 0.3  # Only 30% weight for formal checklists
+
             current_sum = sum(checklist_prior.values())
             if current_sum > 0:
                 for name in checklist_prior:
                     checklist_prior[name] = (checklist_prior[name] / current_sum) * total_formal_mass
         
         # High probability of operating without rigid procedural constraints
-        checklist_prior['None'] = 0.7  # 70% chance of flexible, intent-driven operation
+        if has_strong_procedure_match:
+            checklist_prior['None'] = 0.2  # Lower chance when procedure-driven checklist has strong match
+        else:
+            checklist_prior['None'] = 0.7  # 70% chance of flexible, intent-driven operation
         
         return checklist_prior
     

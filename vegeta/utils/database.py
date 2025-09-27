@@ -130,7 +130,7 @@ class DatabaseManager:
         return self.execute_query(query)
     
     def get_entity_neighbors(self, entity_id: str, hops: int = 1) -> Dict[str, Any]:
-        """Get neighbors of an entity within specified hops"""
+        """Get neighbors of an entity within specified hops (LEGACY - returns minimal data)"""
         query = f"""
         MATCH (start:Entity {{id: $entity_id}})
         MATCH path = (start)-[*1..{hops}]-(connected)
@@ -149,6 +149,81 @@ class DatabaseManager:
             'connected_labels': [],
             'subgraph_size': 0
         }
+
+    def get_full_subgraph(self, entity_id: str, hops: int = 2) -> Dict[str, Any]:
+        """
+        Get complete subgraph within specified hops including all nodes, relationships, and properties.
+        This implements the selective activation approach from attemp1TextOnly.py.
+        """
+        try:
+            # Get all nodes in the subgraph
+            nodes_query = f"""
+            MATCH (start:Entity {{id: $entity_id}})
+            MATCH path = (start)-[*0..{hops}]-(node)
+            WHERE node:Entity OR node:SlotValue OR node:Fact OR node:Type OR node:RelationType
+            RETURN DISTINCT
+                node.id as id,
+                node.name as name,
+                labels(node) as labels,
+                properties(node) as properties
+            """
+            nodes = self.execute_query(nodes_query, {'entity_id': entity_id})
+
+            # Get all relationships in the subgraph
+            relationships_query = f"""
+            MATCH (start:Entity {{id: $entity_id}})
+            MATCH path = (start)-[*0..{hops}]-(source)-[rel]-()
+            WHERE source.id IN $node_ids
+            RETURN DISTINCT
+                source.id as source_id,
+                type(rel) as relationship_type,
+                endNode(rel).id as target_id,
+                properties(rel) as properties
+            """
+            node_ids = [node['id'] for node in nodes]
+            relationships = self.execute_query(relationships_query, {
+                'entity_id': entity_id,
+                'node_ids': node_ids
+            })
+
+            # Get Fact nodes specifically (critical for awards, etc.)
+            facts_query = f"""
+            MATCH (start:Entity {{id: $entity_id}})
+            MATCH path = (start)-[*0..{hops}]-(fact:Fact)
+            RETURN DISTINCT
+                fact.id as fact_id,
+                fact.kind as fact_kind,
+                fact.confidence as confidence,
+                properties(fact) as properties
+            """
+            facts = self.execute_query(facts_query, {'entity_id': entity_id})
+
+            # Structure the complete subgraph
+            subgraph = {
+                'anchor_id': entity_id,
+                'nodes': nodes,
+                'relationships': relationships,
+                'facts': facts,
+                'metadata': {
+                    'hops': hops,
+                    'node_count': len(nodes),
+                    'relationship_count': len(relationships),
+                    'fact_count': len(facts)
+                }
+            }
+
+            logger.info(f"Retrieved full subgraph for {entity_id}: {len(nodes)} nodes, {len(relationships)} relationships, {len(facts)} facts")
+            return subgraph
+
+        except Exception as e:
+            logger.error(f"Failed to retrieve full subgraph for {entity_id}: {e}")
+            return {
+                'anchor_id': entity_id,
+                'nodes': [],
+                'relationships': [],
+                'facts': [],
+                'metadata': {'hops': hops, 'node_count': 0, 'relationship_count': 0, 'fact_count': 0}
+            }
     
     def get_slot_values_for_entity(self, entity_id: str) -> List[Dict[str, Any]]:
         """Get all slot values for an entity"""

@@ -38,6 +38,12 @@ session:
   max_turns: 20
   inertia_rho: 0.7
 
+  # Context window management
+  max_context_tokens: 2048      # Total context window (~1500 words)
+  summary_tokens: 256           # Conversation summary limit (~200 words)
+  context_window_turns: 5       # Recent turns to include
+  compression_ratio: 0.3        # Summary compression factor
+
 logging:
   level: "INFO"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

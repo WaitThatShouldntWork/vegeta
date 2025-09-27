@@ -40,21 +40,24 @@ class ConversationTurn:
     def to_dict(self):
         return asdict(self)
 
-@dataclass 
+@dataclass
 class SessionState:
     """Persistent session state that carries forward between turns"""
     session_id: str
     start_time: float
     last_active: float
-    
+
     # Conversation history
     turns: List[ConversationTurn]
     conversation_summary: str
-    
+
     # Bayesian state carryover
     belief_state: Dict[str, Any]  # q_t(v) from last turn
     adaptation_context: Dict[str, Any]  # For meta-learning
-    
+
+    # Procedure tracking (CRITICAL NEW FEATURE!)
+    procedure_state: Dict[str, Any]  # Tracks active checklist, completed slots, current step
+
     # Performance tracking
     cumulative_confidence: List[float]
     success_rate: float
@@ -68,6 +71,7 @@ class SessionState:
             'turns': [turn.to_dict() for turn in self.turns],
             'conversation_summary': self.conversation_summary,
             'belief_state': self.belief_state,
+            'procedure_state': self.procedure_state,
             'adaptation_context': self.adaptation_context,
             'cumulative_confidence': self.cumulative_confidence,
             'success_rate': self.success_rate,
@@ -84,6 +88,14 @@ class SessionManager:
         self.session_timeout = session_config.get('timeout', 3600)  # 1 hour
         self.max_turns = session_config.get('max_turns', 20)
         self.inertia_rho = session_config.get('inertia_rho', 0.7)  # Belief carryover strength
+
+        # Context window management
+        self.context_window = {
+            'max_tokens': session_config.get('max_context_tokens', 2048),  # ~1500 words
+            'summary_tokens': session_config.get('summary_tokens', 256),    # ~200 words
+            'recent_turns': session_config.get('context_window_turns', 5),   # Last N turns
+            'compression_ratio': session_config.get('compression_ratio', 0.3)  # Summary compression
+        }
         
     def start_session(self, user_id: Optional[str] = None) -> str:
         """Start a new conversation session"""
@@ -96,6 +108,7 @@ class SessionManager:
             turns=[],
             conversation_summary="",
             belief_state={},
+            procedure_state={},  # NEW: Track procedure state across turns
             adaptation_context={},
             cumulative_confidence=[],
             success_rate=0.5,  # Neutral starting point
@@ -184,10 +197,15 @@ class SessionManager:
         session = self.get_session(session_id)
         if not session:
             return {}
-        
+
+        # Use configured window size if not specified
+        if window_size is None:
+            window_size = self.context_window['recent_turns']
+
         recent_turns = session.turns[-window_size:] if session.turns else []
-        
-        return {
+
+        # Create context with token management
+        context = {
             'session_id': session_id,
             'turn_count': len(session.turns),
             'recent_turns': [turn.to_dict() for turn in recent_turns],
@@ -195,8 +213,54 @@ class SessionManager:
             'success_rate': session.success_rate,
             'domain_expertise': session.domain_expertise,
             'session_duration': time.time() - session.start_time,
-            'adaptation_context': session.adaptation_context
+            'adaptation_context': session.adaptation_context,
+            'context_window': self.context_window
         }
+
+        # Check if we need to compress context
+        context_size = self._estimate_context_tokens(context)
+        if context_size > self.context_window['max_tokens']:
+            context = self._compress_context(context)
+
+        return context
+
+    def _estimate_context_tokens(self, context: Dict[str, Any]) -> int:
+        """Roughly estimate token count in context"""
+        # Simple heuristic: ~4 characters per token
+        total_chars = 0
+
+        # Summary
+        total_chars += len(context.get('conversation_summary', ''))
+
+        # Recent turns (user + system messages)
+        for turn in context.get('recent_turns', []):
+            total_chars += len(turn.get('user_utterance', ''))
+            total_chars += len(turn.get('system_response', ''))
+
+        # Metadata
+        total_chars += len(str(context.get('adaptation_context', {})))
+
+        return total_chars // 4  # Rough token estimate
+
+    def _compress_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Compress context to fit within token limits"""
+        logger.info("Compressing context to fit token limits")
+
+        # Reduce number of recent turns
+        recent_turns = context.get('recent_turns', [])
+        if len(recent_turns) > 2:
+            # Keep only the most recent 2 turns
+            context['recent_turns'] = recent_turns[-2:]
+
+        # Compress summary if still too large
+        if self._estimate_context_tokens(context) > self.context_window['max_tokens']:
+            original_summary = context.get('conversation_summary', '')
+            # Simple compression: take first N characters that fit summary_tokens
+            max_chars = self.context_window['summary_tokens'] * 4
+            if len(original_summary) > max_chars:
+                context['conversation_summary'] = original_summary[:max_chars] + "..."
+
+        return context
     
     def _update_conversation_summary(self, session: SessionState) -> str:
         """Update conversation summary with recent developments"""
@@ -259,3 +323,38 @@ class SessionManager:
         context['complexity_score'] = sum(complexity_indicators.values()) / len(complexity_indicators)
         
         return context
+
+    def update_procedure_state(self, session_id: str, checklist_name: str,
+                              completed_slots: List[str], current_step: str) -> None:
+        """Update procedure state for a session"""
+
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        session.procedure_state = {
+            'active_checklist': checklist_name,
+            'completed_slots': completed_slots,
+            'current_step': current_step,
+            'last_updated': time.time()
+        }
+
+        logger.debug(f"Updated procedure state for {session_id}: {session.procedure_state}")
+
+    def get_procedure_state(self, session_id: str) -> Dict[str, Any]:
+        """Get current procedure state for a session"""
+
+        session = self.sessions.get(session_id)
+        if session:
+            return session.procedure_state.copy()
+        return {}
+
+    def complete_procedure(self, session_id: str) -> None:
+        """Mark procedure as completed"""
+
+        session = self.sessions.get(session_id)
+        if session:
+            session.procedure_state = {
+                'status': 'completed',
+                'completed_at': time.time()
+            }

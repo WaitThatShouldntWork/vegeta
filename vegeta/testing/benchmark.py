@@ -49,25 +49,50 @@ class EvaluationMetrics:
 
 class BenchmarkRunner:
     """Runs benchmarks against the VEGETA system"""
-    
-    def __init__(self, system: VegetaSystem):
+
+    def __init__(self, system: VegetaSystem, verbose: bool = False):
         self.system = system
         self.results = []
+        self.verbose = verbose
     
     def run_minimal_benchmark(self) -> Dict:
         """Run a minimal benchmark with just one test case for validation"""
-        
+
         logger.info("Running minimal benchmark with 1 test case")
-        
+
         # Use one simple test case
         test_case = "I want action movies similar to Heat"
-        
+
+        if self.verbose:
+            print("\n🔍 VERBOSE MODE ENABLED")
+            print("=" * 50)
+            print(f"📝 Test Query: {test_case}")
+            print("=" * 50)
+
         try:
             # Run system
             start_time = datetime.now()
+
+            if self.verbose:
+                print("🚀 Starting system session...")
+
             session_id = self.system.start_session()
+
+            if self.verbose:
+                print(f"📋 Session ID: {session_id}")
+                print("⚡ Processing query...")
+
             result = self.system.process_query(session_id, test_case)
             end_time = datetime.now()
+
+            if self.verbose:
+                print("\n📊 QUERY PROCESSING COMPLETE")
+                print("-" * 30)
+                print(f"⏱️  Total processing time: {(end_time - start_time).total_seconds():.2f}s")
+                print(f"🎯 Action: {result.action}")
+                print(f"🎚️  Confidence: {result.confidence:.3f}")
+                print(f"💬 Response: {result.content[:100]}{'...' if len(result.content) > 100 else ''}")
+                print("-" * 30)
             
             # Convert VegetaResponse to dict for evaluation
             result_dict = {
@@ -122,18 +147,41 @@ class BenchmarkRunner:
         results = {}
         
         for category, cases in test_cases.items():
+            if self.verbose:
+                print(f"\n📂 CATEGORY: {category}")
+                print(f"📊 Running {len(cases)} test cases")
+                print("-" * 40)
+
             logger.info(f"Running {category} category with {len(cases)} test cases")
             category_results = []
-            
-            for test_case in cases:
+
+            for i, test_case in enumerate(cases):
+                if self.verbose:
+                    print(f"\n🎯 Test {i+1}/{len(cases)}: {test_case}")
+
                 logger.info(f"Testing: {test_case}")
-                
+
                 try:
                     # Run system
                     start_time = datetime.now()
+
+                    if self.verbose:
+                        print("🚀 Starting session...")
+
                     session_id = self.system.start_session()
                     result = self.system.process_query(session_id, test_case)
                     end_time = datetime.now()
+
+                    if self.verbose:
+                        print("\n📊 RESULT:")
+                        print(f"  🎯 Action: {result.action}")
+                        print(f"  🎚️  Confidence: {result.confidence:.3f}")
+                        print(f"  ⏱️  Response Time: {(end_time - start_time).total_seconds():.2f}s")
+                        if result.target:
+                            print(f"  🎯 Target: {result.target}")
+                        if result.reasoning:
+                            print(f"  🧠 Reasoning: {result.reasoning[:100]}{'...' if len(result.reasoning) > 100 else ''}")
+                        print("-" * 30)
                     
                     # Convert VegetaResponse to dict for evaluation
                     result_dict = {
@@ -170,21 +218,41 @@ class BenchmarkRunner:
         results = {}
         
         for category, conversations in test_conversations.items():
+            if self.verbose:
+                print(f"\n🔄 MULTI-TURN CATEGORY: {category}")
+                print(f"💬 Testing {len(conversations)} conversations")
+                print("=" * 50)
+
             logger.info(f"Running {category} multi-turn with {len(conversations)} conversations")
             category_results = []
-            
-            for conversation in conversations:
+
+            for conv_idx, conversation in enumerate(conversations):
+                if self.verbose:
+                    print(f"\n📝 Conversation {conv_idx+1}/{len(conversations)}: {conversation}")
+
                 logger.info(f"Testing conversation: {conversation}")
-                
+
                 try:
                     # Run full conversation
+                    if self.verbose:
+                        print("🚀 Starting new session...")
+
                     session_id = self.system.start_session()
                     conversation_result = []
                     
                     for turn_idx, user_input in enumerate(conversation):
+                        if self.verbose:
+                            print(f"\n  🔄 Turn {turn_idx+1}/{len(conversation)}: \"{user_input}\"")
+
                         start_time = datetime.now()
                         result = self.system.process_query(session_id, user_input)
                         end_time = datetime.now()
+
+                        if self.verbose:
+                            print(f"    📊 Action: {result.action} (conf: {result.confidence:.3f})")
+                            print(f"    ⏱️  Time: {(end_time - start_time).total_seconds():.2f}s")
+                            if result.reasoning:
+                                print(f"    🧠 Reasoning: {result.reasoning[:80]}{'...' if len(result.reasoning) > 80 else ''}")
                         
                         # Convert VegetaResponse to dict and add metadata
                         result_dict = {
@@ -202,6 +270,20 @@ class BenchmarkRunner:
                     
                     # Evaluate conversation
                     evaluation = self._evaluate_conversation(conversation, conversation_result)
+
+                    if self.verbose:
+                        final_action = evaluation.get('final_action', 'UNKNOWN')
+                        final_confidence = evaluation.get('final_confidence', 0.0)
+                        num_turns = evaluation.get('num_turns', len(conversation))
+                        resolved = evaluation.get('conversation_resolved', False)
+
+                        print(f"\n  📈 CONVERSATION SUMMARY:")
+                        print(f"    🎯 Final Action: {final_action}")
+                        print(f"    🎚️  Final Confidence: {final_confidence:.3f}")
+                        print(f"    🔄 Total Turns: {num_turns}")
+                        print(f"    ✅ Resolved: {'Yes' if resolved else 'No'}")
+                        print("=" * 50)
+
                     category_results.append(evaluation)
                     
                 except Exception as e:
@@ -218,15 +300,45 @@ class BenchmarkRunner:
     
     def run_quick_test(self, num_cases_per_category: int = 2) -> Dict:
         """Run a quick subset of tests for rapid validation"""
-        
-        quick_tests = {}
+
+        # Single-turn tests (existing logic)
+        quick_single_tests = {}
         for category, subcategories in BENCHMARK_CATEGORIES.items():
             # Take first N single-turn cases
             single_turn_subset = subcategories['single_turn'][:num_cases_per_category]
-            quick_tests[category] = single_turn_subset
-            
-        logger.info(f"Running quick test with {num_cases_per_category} cases per category")
-        return self.run_single_turn_benchmark(quick_tests)
+            quick_single_tests[category] = single_turn_subset
+
+        # Add specific multi-turn tests as requested
+        quick_multi_tests = {
+            'music_rights_verification': [
+                ["I need to verify music rights", "For the film Skyfall", "Check composer and territory"]
+            ],
+            'recommendation': [
+                ["What should I watch?", "Similar to Casino Royale", "Spy thriller"]
+            ]
+        }
+
+        total_single = sum(len(tests) for tests in quick_single_tests.values())
+        total_multi = sum(len(tests) for tests in quick_multi_tests.values())
+
+        if self.verbose:
+            print("\n🔍 VERBOSE QUICK BENCHMARK")
+            print("=" * 50)
+            print(f"📊 Single-turn tests: {total_single}")
+            print(f"🔄 Multi-turn conversations: {total_multi}")
+            print(f"📈 Total test cases: {total_single + total_multi}")
+            print("=" * 50)
+
+        logger.info(f"Running quick test: {total_single} single-turn + {total_multi} multi-turn tests")
+
+        # Run both single-turn and multi-turn tests
+        single_results = self.run_single_turn_benchmark(quick_single_tests)
+        multi_results = self.run_multi_turn_benchmark(quick_multi_tests)
+
+        return {
+            "single_turn": single_results,
+            "multi_turn": multi_results
+        }
     
     def _evaluate_single_turn(self, test_case: str, result: Dict, start_time, end_time) -> Dict:
         """Evaluate a single turn"""
@@ -340,20 +452,25 @@ class BenchmarkRunner:
         
         # Filter out error cases for metrics
         valid_evaluations = [e for e in all_evaluations if 'error' not in e]
-        
+
         if not valid_evaluations:
             return {"error": "No valid evaluation results", "total_cases": len(all_evaluations)}
-        
+
+        # Separate single-turn and multi-turn evaluations
+        single_turn_evaluations = [e for e in valid_evaluations if 'conversation' not in e]
+        multi_turn_evaluations = [e for e in valid_evaluations if 'conversation' in e]
+
         # Aggregate metrics
         metrics = {}
-        
-        # Decision accuracy
-        decision_correct = [e['decision_correct'] for e in valid_evaluations if e['decision_correct'] is not None]
-        metrics['decision_accuracy'] = np.mean(decision_correct) if decision_correct else 0
-        
-        # Confidence calibration  
-        conf_appropriate = [e['confidence_appropriate'] for e in valid_evaluations if e['confidence_appropriate'] is not None]
-        metrics['confidence_calibration'] = np.mean(conf_appropriate) if conf_appropriate else 0
+
+        # Decision accuracy (only for single-turn evaluations)
+        if single_turn_evaluations:
+            decision_correct = [e['decision_correct'] for e in single_turn_evaluations if e.get('decision_correct') is not None]
+            metrics['decision_accuracy'] = np.mean(decision_correct) if decision_correct else 0
+
+            # Confidence calibration
+            conf_appropriate = [e['confidence_appropriate'] for e in single_turn_evaluations if e.get('confidence_appropriate') is not None]
+            metrics['confidence_calibration'] = np.mean(conf_appropriate) if conf_appropriate else 0
         
         # Performance
         response_times = [e['response_time'] for e in valid_evaluations if 'response_time' in e]
@@ -361,33 +478,61 @@ class BenchmarkRunner:
         metrics['max_response_time'] = np.max(response_times) if response_times else 0
         metrics['min_response_time'] = np.min(response_times) if response_times else 0
         
-        # Confidence analysis
-        confidences = [e['confidence'] for e in valid_evaluations]
-        metrics['avg_confidence'] = np.mean(confidences) if confidences else 0
-        metrics['confidence_std'] = np.std(confidences) if confidences else 0
-        
-        # Action distribution
-        actions = [e['action'] for e in valid_evaluations]
-        action_counts = {}
-        for action in set(actions):
-            action_counts[action] = actions.count(action)
-        metrics['action_distribution'] = action_counts
+        # Confidence analysis (only for single-turn evaluations)
+        if single_turn_evaluations:
+            confidences = [e['confidence'] for e in single_turn_evaluations]
+            metrics['avg_confidence'] = np.mean(confidences) if confidences else 0
+            metrics['confidence_std'] = np.std(confidences) if confidences else 0
+
+        # Action distribution (only for single-turn evaluations)
+        if single_turn_evaluations:
+            actions = [e['action'] for e in single_turn_evaluations]
+            action_counts = {}
+            for action in set(actions):
+                action_counts[action] = actions.count(action)
+            metrics['action_distribution'] = action_counts
+
+        # Multi-turn specific metrics
+        if multi_turn_evaluations:
+            metrics['multi_turn_summary'] = {
+                'total_conversations': len(multi_turn_evaluations),
+                'avg_questions_per_conversation': np.mean([e['questions_asked'] for e in multi_turn_evaluations]),
+                'conversation_resolution_rate': np.mean([e.get('conversation_resolved', False) for e in multi_turn_evaluations]),
+                'avg_conversation_length': np.mean([e['num_turns'] for e in multi_turn_evaluations])
+            }
         
         # Category breakdown
         category_stats = {}
         for category, category_results in results.items():
             valid_category_results = [e for e in category_results if 'error' not in e]
             if valid_category_results:
-                category_accuracies = [e['decision_correct'] for e in valid_category_results if e['decision_correct'] is not None]
-                category_stats[category] = {
+                # Handle both single-turn and multi-turn evaluations
+                single_turn_results = [e for e in valid_category_results if 'conversation' not in e]
+                multi_turn_results = [e for e in valid_category_results if 'conversation' in e]
+
+                category_info = {
                     'count': len(valid_category_results),
                     'errors': len(category_results) - len(valid_category_results),
-                    'accuracy': np.mean(category_accuracies) if category_accuracies else 0,
-                    'avg_confidence': np.mean([e['confidence'] for e in valid_category_results]),
-                    'avg_response_time': np.mean([e['response_time'] for e in valid_category_results])
+                    'single_turn_count': len(single_turn_results),
+                    'multi_turn_count': len(multi_turn_results)
                 }
+
+                # Single-turn metrics
+                if single_turn_results:
+                    category_accuracies = [e['decision_correct'] for e in single_turn_results if e.get('decision_correct') is not None]
+                    category_info['accuracy'] = np.mean(category_accuracies) if category_accuracies else 0
+                    category_info['avg_confidence'] = np.mean([e['confidence'] for e in single_turn_results])
+                    category_info['avg_response_time'] = np.mean([e['response_time'] for e in single_turn_results])
+
+                # Multi-turn metrics
+                if multi_turn_results:
+                    resolved_count = sum(1 for e in multi_turn_results if e.get('conversation_resolved', False))
+                    category_info['conversation_resolution_rate'] = resolved_count / len(multi_turn_results)
+                    category_info['avg_questions_per_conversation'] = np.mean([e['questions_asked'] for e in multi_turn_results])
+
+                category_stats[category] = category_info
         
-        return {
+        report = {
             'summary_metrics': metrics,
             'category_breakdown': category_stats,
             'detailed_results': results,
@@ -396,7 +541,80 @@ class BenchmarkRunner:
             'valid_cases': len(valid_evaluations),
             'error_cases': len(all_evaluations) - len(valid_evaluations)
         }
-    
+
+        # Add verbose summary output
+        if self.verbose:
+            self._print_verbose_summary(metrics, category_stats, single_turn_evaluations, multi_turn_evaluations)
+
+        return report
+
+    def _print_verbose_summary(self, metrics: Dict, category_stats: Dict,
+                              single_turn_evaluations: List, multi_turn_evaluations: List):
+        """Print detailed verbose summary of benchmark results"""
+
+        print("\n🎯 VERBOSE BENCHMARK SUMMARY")
+        print("=" * 80)
+
+        # Overall metrics
+        print("📈 OVERALL PERFORMANCE:")
+        print(f"   📊 Total Test Cases: {metrics.get('total_cases', 0)}")
+        if 'decision_accuracy' in metrics:
+            print(f"   ✅ Decision Accuracy: {metrics['decision_accuracy']:.1%}")
+        if 'confidence_calibration' in metrics:
+            print(f"   🎯 Confidence Calibration: {metrics['confidence_calibration']:.1%}")
+        if 'avg_response_time' in metrics:
+            print(f"   ⏱️  Avg Response Time: {metrics['avg_response_time']:.2f}s")
+        if 'conversation_resolution_rate' in metrics:
+            print(f"   🔄 Conversation Resolution: {metrics['conversation_resolution_rate']:.1%}")
+
+        # Category breakdown
+        print("\n📂 CATEGORY BREAKDOWN:")
+        print("-" * 50)
+
+        for category, stats in category_stats.items():
+            print(f"\n🏷️  {category.upper()}:")
+            print(f"   📊 Total: {stats['count']} tests")
+            if 'accuracy' in stats:
+                print(f"   ✅ Accuracy: {stats['accuracy']:.1%}")
+            if 'avg_confidence' in stats:
+                print(f"   🎚️  Avg Confidence: {stats['avg_confidence']:.3f}")
+            if 'avg_response_time' in stats:
+                print(f"   ⏱️  Avg Time: {stats['avg_response_time']:.2f}s")
+            if 'conversation_resolution_rate' in stats:
+                print(f"   🔄 Resolution Rate: {stats['conversation_resolution_rate']:.1%}")
+            if stats['errors'] > 0:
+                print(f"   ❌ Errors: {stats['errors']}")
+
+        # Detailed action distribution
+        if single_turn_evaluations:
+            print("\n🎯 ACTION DISTRIBUTION (Single-turn):")
+            print("-" * 40)
+            actions = {}
+            for e in single_turn_evaluations:
+                action = e.get('action', 'UNKNOWN')
+                actions[action] = actions.get(action, 0) + 1
+
+            for action, count in sorted(actions.items(), key=lambda x: x[1], reverse=True):
+                percentage = count / len(single_turn_evaluations) * 100
+                print(".1f")
+
+        # Worst performing tests
+        if single_turn_evaluations:
+            print("\n📉 WORST PERFORMING TESTS:")
+            print("-" * 30)
+            # Sort by decision correctness and confidence
+            sorted_tests = sorted(
+                [e for e in single_turn_evaluations if e.get('decision_correct') is not None],
+                key=lambda x: (not x.get('decision_correct', True), -x.get('confidence', 0))
+            )
+
+            for i, test in enumerate(sorted_tests[:5]):  # Top 5 worst
+                status = "❌" if not test.get('decision_correct', True) else "✅"
+                print("2d")
+
+        print("\n🎉 VERBOSE BENCHMARK COMPLETE!")
+        print("=" * 80)
+
     def save_results(self, results: Dict, filename: str = None):
         """Save results to file"""
         if filename is None:

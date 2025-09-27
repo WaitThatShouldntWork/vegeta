@@ -5,6 +5,7 @@ Command-line interface for VEGETA system
 import argparse
 import logging
 import sys
+import time
 from typing import Optional
 
 from ..core.system import VegetaSystem
@@ -89,13 +90,16 @@ class VegetaCLI:
             self._print_error(f"Unexpected error during initialization: {e}")
             return False
     
-    def run_interactive(self):
+    def run_interactive(self, verbose: bool = False):
         """Run interactive 20-questions mode"""
         
         if not self.start_system():
             return 1
         
         self._print_header("VEGETA Interactive Mode")
+        if verbose:
+            print("🔍 VERBOSE MODE ENABLED")
+            print("=" * 40)
         print("Type 'quit' or 'exit' to end the session")
         print("Type 'help' for available commands")
         print("Type 'new' to start a new session")
@@ -129,7 +133,7 @@ class VegetaCLI:
                         continue
                     
                     # Process query
-                    self._process_query(user_input)
+                    self._process_query(user_input, verbose)
                     
                 except KeyboardInterrupt:
                     print("\nUse 'quit' or 'exit' to end the session.")
@@ -145,7 +149,7 @@ class VegetaCLI:
         
         return 0
     
-    def run_single_query(self, query: str):
+    def run_single_query(self, query: str, verbose: bool = False):
         """Run a single query and exit"""
         
         if not self.start_system():
@@ -155,14 +159,24 @@ class VegetaCLI:
             # Start session and process query
             session_id = self.system.start_session()
             self._print_header(f"Processing Query: '{query}'")
-            
-            response = self.system.process_query(session_id, query, include_internal_state=True)
-            
+
+            if verbose:
+                print("⚡ PROCESSING QUERY...")
+                print(f"  📝 Query: {query}")
+                print(f"  🆔 Session: {session_id}")
+                print("-" * 40)
+
+            response = self.system.process_query(session_id, query, include_internal_state=verbose)
+
+            if verbose:
+                print("\n📊 PROCESSING COMPLETE")
+                print("-" * 40)
+
             # Display response
             self._display_response(response)
-            
-            # Show internal state if available
-            if response.internal_state:
+
+            # Show internal state if available and verbose mode enabled
+            if response.internal_state and verbose:
                 self._display_internal_state(response.internal_state)
             
         except VegetaError as e:
@@ -177,16 +191,30 @@ class VegetaCLI:
         
         return 0
     
-    def _process_query(self, query: str):
+    def _process_query(self, query: str, verbose: bool = False):
         """Process a single query in interactive mode"""
         try:
+            if verbose:
+                print("\n⚡ PROCESSING QUERY...")
+                print(f"  📝 Query: {query}")
+                print(f"  🆔 Session: {self.current_session}")
+                print("-" * 40)
+                start_time = time.time()
+
             response = self.system.process_query(self.current_session, query)
+
+            if verbose:
+                end_time = time.time()
+                print("\n📊 PROCESSING COMPLETE")
+                print(".2f")
+                print("-" * 40)
+
             self._display_response(response)
-            
+
             # Handle ASK responses - get user feedback
             if response.action == 'ASK':
                 print(f"{Fore.YELLOW}(Provide your response to help narrow down the answer){Style.RESET_ALL}")
-        
+
         except VegetaError as e:
             self._print_error(f"Query processing failed: {e}")
         except Exception as e:
@@ -271,11 +299,11 @@ class VegetaCLI:
     
     def _print_success(self, text: str):
         """Print success message"""
-        print(f"{Fore.GREEN}✓ {text}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[SUCCESS] {text}{Style.RESET_ALL}")
     
     def _print_error(self, text: str):
         """Print error message"""
-        print(f"{Fore.RED}✗ {text}{Style.RESET_ALL}")
+        print(f"{Fore.RED}[ERROR] {text}{Style.RESET_ALL}")
     
     def run_benchmark(self, benchmark_type: str = "quick", save_results: bool = True, verbose: bool = False):
         """Run benchmark evaluation"""
@@ -286,24 +314,24 @@ class VegetaCLI:
         try:
             self._print_header(f"Running {benchmark_type.upper()} Benchmark")
             
-            # Create benchmark runner
-            runner = BenchmarkRunner(self.system)
+            # Create benchmark runner with verbose setting
+            runner = BenchmarkRunner(self.system, verbose=verbose)
             
             # Run appropriate benchmark
             if benchmark_type == "minimal":
-                print("⚡ Running minimal benchmark (1 test case)")
+                print("Running minimal benchmark (1 test case)")
                 results = runner.run_minimal_benchmark()
             elif benchmark_type == "quick":
-                print("🏃 Running quick benchmark (2 cases per category)")
+                print("Running quick benchmark (2 cases per category)")
                 results = runner.run_quick_test(num_cases_per_category=2)
             elif benchmark_type == "single":
-                print("📝 Running single-turn benchmark")
+                print("Running single-turn benchmark")
                 results = runner.run_single_turn_benchmark()
             elif benchmark_type == "multi":
-                print("🔄 Running multi-turn benchmark")
+                print("Running multi-turn benchmark")
                 results = runner.run_multi_turn_benchmark()
             elif benchmark_type == "full":
-                print("🎯 Running full benchmark suite")
+                print("Running full benchmark suite")
                 single_results = runner.run_single_turn_benchmark()
                 multi_results = runner.run_multi_turn_benchmark()
                 results = {
@@ -315,7 +343,12 @@ class VegetaCLI:
                 return 1
             
             # Generate report
-            print("📊 Generating evaluation report...")
+            if verbose:
+                print("\n📊 GENERATING DETAILED EVALUATION REPORT...")
+                print("=" * 60)
+            else:
+                print("📊 Generating evaluation report...")
+
             if benchmark_type == "full":
                 # Generate separate reports for single and multi-turn
                 single_report = runner.generate_report(single_results)
@@ -363,10 +396,9 @@ class VegetaCLI:
             if save_results:
                 filename = runner.save_results(report)
                 self._print_success(f"Results saved to: {filename}")
-            
+
             self._print_success("Benchmark completed successfully!")
-            return 0
-            
+
         except VegetaError as e:
             self._print_error(f"VEGETA system error: {e}")
             return 1
@@ -379,6 +411,8 @@ class VegetaCLI:
         finally:
             if self.system:
                 self.system.close()
+
+        return 0
 
 def main():
     """Main CLI entry point"""
@@ -394,10 +428,20 @@ def main():
     
     # Interactive mode
     interactive_parser = subparsers.add_parser('interactive', help='Start interactive 20-questions mode')
+    interactive_parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose output in interactive mode'
+    )
     
     # Single query mode
     query_parser = subparsers.add_parser('query', help='Process a single query')
     query_parser.add_argument('text', help='Query text to process')
+    query_parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose output'
+    )
     
     # Benchmark mode
     benchmark_parser = subparsers.add_parser('benchmark', help='Run benchmark evaluation')
@@ -432,14 +476,14 @@ def main():
     
     # Route to appropriate mode
     if args.command == 'interactive':
-        return cli.run_interactive()
+        return cli.run_interactive(verbose=getattr(args, 'verbose', False))
     elif args.command == 'query':
-        return cli.run_single_query(args.text)
+        return cli.run_single_query(args.text, verbose=getattr(args, 'verbose', False))
     elif args.command == 'benchmark':
         return cli.run_benchmark(args.type, args.save, args.verbose)
     else:
         # Default to interactive if no command specified
-        return cli.run_interactive()
+        return cli.run_interactive(verbose=getattr(args, 'verbose', False))
 
 if __name__ == '__main__':
     sys.exit(main())

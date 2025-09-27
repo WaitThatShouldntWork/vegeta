@@ -26,6 +26,14 @@ class InferenceError(VegetaError):
     """Bayesian inference and decision errors"""
     pass
 
+class PredictionError(InferenceError):
+    """Generative model prediction errors"""
+    pass
+
+class LikelihoodError(InferenceError):
+    """Likelihood computation errors"""
+    pass
+
 class SessionError(VegetaError):
     """Multi-turn session management errors"""
     pass
