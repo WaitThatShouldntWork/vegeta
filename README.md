@@ -1,6 +1,6 @@
 # VEGETA - Variational Evidence Graph, Estimating Temporal Activations
 
-A  **Bayesian Active Inference System** implementing complete **predictive coding** architecture for complex conversational interactions and graph-based knowledge retrieval.
+A **Bayesian Active Inference System** with **predictive coding** architecture for complex conversational interactions and graph-based knowledge retrieval.
 
 VEGETA is a working Bayesian active inference prototype with:
 - ✅ **Complete Predictive Coding Pipeline**: Generative model → likelihood → posterior updates
@@ -17,7 +17,7 @@ VEGETA is a working Bayesian active inference prototype with:
 - **🔄 Multi-Turn Conversations**: Maintains conversation state and belief carryover across turns
 - **🎯 Smart Question Generation**: Uses LLMs to generate natural clarifying questions
 - **📊 Uncertainty Quantification**: Tracks confidence and reasoning for transparent decision-making
-- **🎮 20-Questions Gameplay**: Perfect for guessing games and interactive discovery
+- **🎮 20-Questions style interaction**: Perfect for guessing games and interactive discovery
 
 ## Quick Start
 
