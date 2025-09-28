@@ -1,6 +1,6 @@
 # VEGETA - Variational Evidence Graph, Estimating Temporal Activations
 
-"Tell me, does a machine like yourself ever experience fear?" - Vegeta, DBZ.
+**_"Let me ask you, does a machine like yourself ever experience fear?"_** - Vegeta, DBZ.
 
 The goal with Vegeta is to build an agentic system that can pass the GAIA benchmark. I am using an **active Bayesian inference** approach with **predictive coding** on knowledge graph to have the system predict the next best action to take depending on an user input: ASK, SEARCH or ACT. 
 
@@ -389,4 +389,5 @@ If you use VEGETA in your research, please cite:
   url={https://github.com/waitThatShouldntWork/vegeta}
 }
 ```
+
 
