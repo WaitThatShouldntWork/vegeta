@@ -1,27 +1,23 @@
 # VEGETA - Variational Evidence Graph, Estimating Temporal Activations
 
-**_"Let me ask you, does a machine like yourself ever experience fear?"_** - Vegeta, DBZ.
+A  **Bayesian Active Inference System** implementing complete **predictive coding** architecture for complex conversational interactions and graph-based knowledge retrieval.
 
-The goal with Vegeta is to build an agentic system that can pass the GAIA benchmark. I am using an **active Bayesian inference** approach with **predictive coding** on knowledge graph to have the system predict the next best action to take depending on an user input: ASK, SEARCH or ACT. 
-
-The hypothesis is rather than use Language Models and extended 'thinking' to brute force to the solution (which still often doesn't work); we copy what humans do, which is *detect uncertainty* (gaps in our knowledge) and ask for clarification (when given a task for example) or search for missing knowledge
-
-VEGETA is a working prototype with:
-- **Predictive Coding Pipeline**: Generative model → likelihood → posterior updates
-- **Three-Channel Predictions**: Semantic, structural, and terms prediction channels
-- **Active Inference Engine**: EIG-based decision making with ASK/SEARCH/ANSWER actions
-- **Comprehensive Benchmarking**: 33 test cases with evaluation metrics
-- **Multi-Turn Session Management**: Belief carryover and context awareness
-- **Graph-Based Knowledge Retrieval**: Neo4j integration storing both semantic and latent world representations
+VEGETA is a working Bayesian active inference prototype with:
+- ✅ **Complete Predictive Coding Pipeline**: Generative model → likelihood → posterior updates
+- ✅ **Three-Channel Predictions**: Semantic, structural, and terms prediction channels
+- ✅ **Active Inference Engine**: EIG-based decision making with ASK/SEARCH/ANSWER actions
+- ✅ **Comprehensive Benchmarking**: 33 test cases with evaluation metrics
+- ✅ **Multi-Turn Session Management**: Belief carryover and context awareness
+- ✅ **Graph-Based Knowledge Retrieval**: Neo4j integration with 21 nodes and 100% embedding coverage
 
 ## Features
 
-- **🧠 Bayesian Active Inference**: Uses Expected Information Gain (EIG) to decide between asking questions, searching for facts, or providing answers.
+- **🧠 Bayesian Active Inference**: Uses Expected Information Gain (EIG) to decide between asking questions, searching for facts, or providing answers
 - **🔗 Graph-Based Knowledge**: Leverages Neo4j knowledge graphs with semantic embeddings
-- **🔄 Multi-Turn Conversations**: Maintains conversation state and belief carryover across turns.
-- **🎯 Smart Question Generation**: Uses LLMs to generate natural clarifying questions based off retrieve uncertain nodes.
+- **🔄 Multi-Turn Conversations**: Maintains conversation state and belief carryover across turns
+- **🎯 Smart Question Generation**: Uses LLMs to generate natural clarifying questions
 - **📊 Uncertainty Quantification**: Tracks confidence and reasoning for transparent decision-making
-- **🎮 20-Questions style interaction**: Perfect for guessing games and interactive discovery
+- **🎮 20-Questions Gameplay**: Perfect for guessing games and interactive discovery
 
 ## Quick Start
 
@@ -254,6 +250,72 @@ logging:
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 ```
 
+## Multi-Turn Sessions & Predictive Coding
+
+VEGETA implements a complete **predictive coding architecture** with sophisticated Bayesian inference for multi-turn conversations:
+
+### 🧠 Complete Predictive Coding Pipeline
+
+VEGETA's core is a fully operational Bayesian active inference system with three-channel predictive coding:
+
+1. **Generative Model (G)**: Predicts expected observations from hidden states
+   - Semantic predictions using embedding similarity
+   - Structural predictions using checklist requirements
+   - Terms predictions using subgraph analysis
+
+2. **Likelihood Computation**: Three-channel distance computation with proper normalization
+   - Semantic likelihood using embedding similarity
+   - Structural likelihood using checklist expectations
+   - Terms likelihood with subgraph analysis and penalties
+
+3. **Prior Construction**: Multi-source prior building
+   - Step priors from procedure tracking
+   - Slot priors from candidate subgraph analysis
+   - Conversation history integration with inertia parameter ρ
+
+4. **Active Inference Engine**: EIG-based decision making
+   - 2-step Expected Information Gain planning
+   - ASK/SEARCH/ANSWER action selection
+   - Posterior updates with confidence scoring
+
+### 🎯 Advanced Session Management
+
+VEGETA maintains sophisticated conversation state across turns:
+
+- **Belief Carryover**: Posteriors from previous turns inform current priors through tempered carryover
+- **Observation Persistence**: Stores utterance observations (u) to influence next turn's priors
+- **Context Window Management**: Smart token management with conversation compression
+- **Entity Memory**: Remembers confirmed entities to avoid repetitive questions
+- **Session Persistence**: Handles timeouts, turn limits, and session recovery
+
+### 📊 Bayesian State Management
+
+Advanced Bayesian filtering with predictive coding:
+
+```python
+# Complete predictive coding pipeline
+g(v) → u'_sem, u'_struct, u'_terms  # Generative predictions
+p(u|z) = likelihood computation     # Evidence integration
+p(z|u) = posterior updates         # Belief refinement
+EIG = expected information gain     # Decision optimization
+
+# Multi-turn belief evolution
+p_{t+1}(z) ∝ (q_t(z))^ρ × base_prior × context_boost × procedure_prior
+
+# Where:
+# - ρ ∈ (0,1]: inertia parameter (0.7 = balanced, 1.0 = sticky)
+# - context_boost: utterance similarity + entity continuity (0.3-0.9)
+# - procedure_prior: checklist-driven expectations
+# - q_t(z): posterior beliefs from previous turn
+```
+
+**Key Features:**
+- **Complete Predictive Coding**: Full generative model → likelihood → posterior pipeline
+- **Three-Channel Predictions**: Semantic, structural, and terms prediction channels
+- **Procedure-Driven Reasoning**: Checklist-based task execution with slot filling
+- **Uncertainty Quantification**: Confidence scores with calibration and entropy analysis
+- **Adaptive Question Generation**: Context-aware LLM question formulation
+
 ## Knowledge Graph Schema
 
 The system uses a flexible ontology (see `docs/ontology.md`):
@@ -354,11 +416,10 @@ VEGETA is currently in **Phase 2: Memory-Augmented Intelligence** of its roadmap
 - Comprehensive benchmarking and evaluation
 
 ### 🟡 **Phase 2: Memory-Augmented Intelligence** - CURRENT
-- **MOMDP Formalization**: Converting to formal Mixed Observability Markov Decision Process
 - Episodic case bank implementation
 - External search and tool integration
 - Sleep-like graph maintenance
-- Procedural memory and inference
+- Multi-agent collaborative intelligence
 
 ### 🟢 **Phase 3: Advanced Capabilities** - FUTURE
 - Neuroplasticity-inspired meta-learning
@@ -383,11 +444,9 @@ If you use VEGETA in your research, please cite:
 
 ```bibtex
 @misc{vegeta2024,
-  title={VEGETA: Variational Evidence Graph, Estimating Temporal Activations},
+  title={VEGETA: Bayesian Active Inference for Interactive Knowledge Discovery},
   author={VEGETA Project},
   year={2024},
-  url={https://github.com/waitThatShouldntWork/vegeta}
+  url={https://github.com/your-org/vegeta}
 }
 ```
-
-

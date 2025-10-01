@@ -4,7 +4,7 @@ Uncertainty analysis and decision making using Expected Information Gain
 
 import logging
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 from ..utils.llm_client import LLMClient
 from ..core.config import Config
@@ -259,38 +259,24 @@ class UncertaintyAnalyzer:
         Check if current input is a response to a previous question.
         This enables proper multi-turn conversation flow using Bayesian inference.
         """
-        try:
-            current_utterance = (observation_u.get('u_meta', {}).get('utterance') or '').strip().lower()
-            recent_turns = session_context.get('recent_turns', []) if session_context else []
+        current_utterance = observation_u.get('u_meta', {}).get('utterance', '').strip().lower()
+        recent_turns = session_context.get('recent_turns', [])
 
-            if not recent_turns:
-                logger.debug("No recent turns available for conversation context")
-                return None
-
-            # Get the most recent turn (what we just asked)
-            previous_turn = recent_turns[-1]
-            if not previous_turn:
-                logger.debug("Previous turn is None")
-                return None
-
-            previous_question = (previous_turn.get('system_response') or '').strip()
-            previous_target = previous_turn.get('target') or ''
-
-            logger.debug(f"Checking conversation context: previous='{previous_question}', current='{current_utterance}'")
-            logger.debug(f"Previous turn keys: {list(previous_turn.keys()) if previous_turn else 'None'}")
-            logger.debug(f"Previous target: '{previous_target}'")
-
-            # Handle confirmation responses using Bayesian belief update
-            if self._is_confirmation(current_utterance):
-                return self._handle_bayesian_confirmation(previous_question, previous_target, observation_u)
-
+        if not recent_turns:
             return None
 
-        except Exception as e:
-            logger.warning(f"Error checking conversation context: {e}")
-            logger.debug(f"Session context type: {type(session_context)}")
-            logger.debug(f"Observation_u type: {type(observation_u)}")
-            return None
+        # Get the most recent turn (what we just asked)
+        previous_turn = recent_turns[-1]
+        previous_question = previous_turn.get('system_response', '').strip()
+        previous_target = previous_turn.get('target', '')
+
+        logger.debug(f"Checking conversation context: previous='{previous_question}', current='{current_utterance}'")
+
+        # Handle confirmation responses using Bayesian belief update
+        if self._is_confirmation(current_utterance):
+            return self._handle_bayesian_confirmation(previous_question, previous_target, observation_u)
+
+        return None
 
     def _is_confirmation(self, utterance: str) -> bool:
         """Check if utterance is a confirmation (yes, yeah, correct, etc.)"""
@@ -303,58 +289,45 @@ class UncertaintyAnalyzer:
         Handle confirmation using proper Bayesian belief updates.
         This maintains the integrity of our graph-based inference approach.
         """
-        try:
-            logger.info(f"User confirmed: {previous_target} - updating belief state")
+        logger.info(f"User confirmed: {previous_target} - updating belief state")
 
-            # Instead of hardcoding responses, we enhance the observation to bias toward the confirmed entity
-            # This allows the normal graph traversal and inference to naturally discover the information
+        # Instead of hardcoding responses, we enhance the observation to bias toward the confirmed entity
+        # This allows the normal graph traversal and inference to naturally discover the information
 
-            enhanced_observation = observation_u.copy()
-            enhanced_meta = enhanced_observation.get('u_meta', {}).copy()
+        enhanced_observation = observation_u.copy()
+        enhanced_meta = enhanced_observation.get('u_meta', {}).copy()
 
-            # Add confirmation context that will influence downstream inference
-            enhanced_meta['confirmation_context'] = {
-                'confirmed_entity': previous_target,
-                'confirmation_strength': 0.95,  # Very strong confirmation signal
-                'previous_question': previous_question,
-                'inference_hint': f"User confirmed they mean {previous_target} - strongly bias toward this entity in graph search"
-            }
+        # Add confirmation context that will influence downstream inference
+        enhanced_meta['confirmation_context'] = {
+            'confirmed_entity': previous_target,
+            'confirmation_strength': 0.95,  # Very strong confirmation signal
+            'previous_question': previous_question,
+            'inference_hint': f"User confirmed they mean {previous_target} - strongly bias toward this entity in graph search"
+        }
 
-            # Enhance the utterance to include confirmation context
-            original_utterance = enhanced_meta.get('utterance', '')
-            enhanced_meta['utterance'] = f"{original_utterance} [CONFIRMED_CONTEXT: {previous_target}]"
+        # Enhance the utterance to include confirmation context
+        original_utterance = enhanced_meta.get('utterance', '')
+        enhanced_meta['utterance'] = f"{original_utterance} [CONFIRMED_CONTEXT: {previous_target}]"
 
-            # Add semantic bias (this would ideally update embeddings, but we use metadata for now)
-            enhanced_observation['u_meta'] = enhanced_meta
-            enhanced_observation['confirmation_bias'] = {
-                'target_entity': previous_target,
-                'bias_strength': 0.95,
-                'reason': 'User confirmation of previous clarification'
-            }
+        # Add semantic bias (this would ideally update embeddings, but we use metadata for now)
+        enhanced_observation['u_meta'] = enhanced_meta
+        enhanced_observation['confirmation_bias'] = {
+            'target_entity': previous_target,
+            'bias_strength': 0.95,
+            'reason': 'User confirmation of previous clarification'
+        }
 
-            # The system will continue with normal inference but with strong bias toward confirmed entity
-            # This allows graph-based discovery while respecting user confirmation
-            return {
-                'action': 'CONTINUE_INFERENCE',
-                'target': previous_target,
-                'confidence': 0.95,
-                'margin': 0.9,
-                'reasoning': f'User confirmed {previous_target} - proceeding with biased inference toward this entity',
-                'enhanced_observation': enhanced_observation,
-                'confirmation_bias': previous_target
-            }
-
-        except Exception as e:
-            logger.error(f"Error handling Bayesian confirmation: {e}")
-            # Fallback to safe behavior
-            return {
-                'action': 'ASK',
-                'target': 'clarification',
-                'confidence': 0.0,
-                'margin': 0.0,
-                'reasoning': f'Confirmation handling failed: {e}',
-                'fallback': True
-            }
+        # The system will continue with normal inference but with strong bias toward confirmed entity
+        # This allows graph-based discovery while respecting user confirmation
+        return {
+            'action': 'CONTINUE_INFERENCE',
+            'target': previous_target,
+            'confidence': 0.95,
+            'margin': 0.9,
+            'reasoning': f'User confirmed {previous_target} - proceeding with biased inference toward this entity',
+            'enhanced_observation': enhanced_observation,
+            'confirmation_bias': previous_target
+        }
 
     def _handle_immediate_clarification(self, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Handle LLM-identified immediate clarification needs"""

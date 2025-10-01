@@ -28,9 +28,6 @@ class PriorBuilder:
                     retrieval_context: Dict[str, Any]) -> Dict[str, Any]:
         """Build all priors for the current turn using Bayesian filtering from previous beliefs"""
 
-        # CRITICAL: Get last observation for Bayesian filtering (following Langgraph pattern)
-        last_observation_u = session_context.get('last_observation_u', {})
-
         # Get basic dialogue act classification
         utterance = observation_u.get('u_meta', {}).get('utterance', '')
         dialogue_act_prior = self.query_analyzer.classify_dialogue_act_llm(utterance)
@@ -38,11 +35,6 @@ class PriorBuilder:
         # Get previous posterior for Bayesian filtering (belief carryover)
         previous_posterior = session_context.get('belief_state', {}).get('posterior', {})
         inertia_rho = session_context.get('inertia_rho', 0.7)  # Belief carryover strength
-
-        # CRITICAL: Apply last observation influence (following theory from attempt1TextOnly.py lines 663-711)
-        # The last observation u should influence current priors through Bayesian filtering
-        if last_observation_u:
-            observation_u = self._incorporate_last_observation(observation_u, last_observation_u)
 
         # Build checklist prior with belief carryover
         checklist_prior = self._build_checklist_prior_with_carryover(
@@ -312,112 +304,6 @@ class PriorBuilder:
                 compatibility[step] = 1.0
 
         return compatibility
-
-    def _incorporate_last_observation(self, current_u: Dict[str, Any],
-                                    last_u: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Incorporate last observation into current observation for Bayesian filtering
-
-        Following the theory from attempt1TextOnly.py lines 663-711:
-        "Next priors = tempered carryover × base priors × recency/context"
-        "p_{t+1} ∝ (q_t)^ρ × base_prior × context_boost"
-
-        This implements the Bayesian filtering where the last observation u influences
-        the current turn's priors through context and recency.
-        """
-        import numpy as np
-
-        # Create a copy to modify
-        enhanced_u = current_u.copy()
-
-        # Get current and last utterance texts
-        current_utterance = current_u.get('u_meta', {}).get('utterance', '')
-        last_utterance = last_u.get('u_meta', {}).get('utterance', '')
-
-        # Calculate utterance similarity (simple but effective)
-        current_words = set(current_utterance.lower().split())
-        last_words = set(last_utterance.lower().split())
-
-        if current_words and last_words:
-            # Jaccard similarity between utterances
-            utterance_similarity = len(current_words & last_words) / len(current_words | last_words)
-        else:
-            utterance_similarity = 0.0
-
-        # Extract entities from both observations
-        current_entities = current_u.get('u_meta', {}).get('extraction', {}).get('entities', [])
-        last_entities = last_u.get('u_meta', {}).get('extraction', {}).get('entities', [])
-
-        # Check for entity continuity (same entities mentioned)
-        current_entity_names = set()
-        last_entity_names = set()
-
-        for entity in current_entities:
-            if isinstance(entity, dict):
-                name = entity.get('normalized') or entity.get('surface', '')
-                if name:
-                    current_entity_names.add(name.lower())
-
-        for entity in last_entities:
-            if isinstance(entity, dict):
-                name = entity.get('normalized') or entity.get('surface', '')
-                if name:
-                    last_entity_names.add(name.lower())
-
-        entity_overlap = len(current_entity_names & last_entity_names)
-        entity_continuity = entity_overlap / max(len(current_entity_names | last_entity_names), 1)
-
-        # Calculate context boost based on similarity and continuity
-        # Following theory: higher similarity = stronger context influence
-        context_boost = 0.3 + 0.4 * utterance_similarity + 0.3 * entity_continuity
-        context_boost = min(context_boost, 0.9)  # Cap at 0.9
-
-        # Enhance current observation with context from last observation
-        enhanced_meta = enhanced_u.get('u_meta', {}).copy()
-
-        # Add context information
-        enhanced_meta['context_from_last'] = {
-            'utterance_similarity': utterance_similarity,
-            'entity_continuity': entity_continuity,
-            'context_boost': context_boost,
-            'last_utterance': last_utterance,
-            'shared_entities': list(current_entity_names & last_entity_names)
-        }
-
-        # Boost term matching if entities are shared
-        if entity_continuity > 0.5:
-            current_terms = current_u.get('u_terms_set', set())
-            last_terms = last_u.get('u_terms_set', set())
-
-            # Add last turn's terms with reduced weight to current terms
-            shared_terms = current_terms & last_terms
-            if shared_terms:
-                enhanced_meta['context_boost_terms'] = list(shared_terms)
-                logger.debug(f"Context boost: shared terms {shared_terms} with boost {context_boost}")
-
-        # Enhance semantic embedding if available (weighted combination)
-        current_sem = current_u.get('u_sem')
-        last_sem = last_u.get('u_sem')
-
-        if current_sem is not None and last_sem is not None:
-            # Weighted combination: more weight on current, but influenced by last
-            weight_current = 0.7 + 0.2 * context_boost  # 0.7-0.9
-            weight_last = 0.3 - 0.2 * context_boost     # 0.1-0.3
-
-            # Simple vector combination (assuming same dimensionality)
-            try:
-                combined_sem = np.array(current_sem) * weight_current + np.array(last_sem) * weight_last
-                # L2 normalize
-                combined_sem = combined_sem / np.linalg.norm(combined_sem)
-                enhanced_u['u_sem'] = combined_sem.tolist()
-                enhanced_meta['semantic_context_boost'] = context_boost
-            except Exception as e:
-                logger.debug(f"Could not combine semantic embeddings: {e}")
-
-        enhanced_u['u_meta'] = enhanced_meta
-
-        logger.debug(f"Enhanced observation with context boost: {context_boost:.3f}")
-        return enhanced_u
 
     def _build_slot_priors(self, candidates: List[Dict[str, Any]],
                           step_prior: Dict[str, float],

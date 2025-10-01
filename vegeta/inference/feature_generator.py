@@ -37,10 +37,7 @@ class FeatureGenerator:
             slot_values_batch = self.db_manager.get_slot_values_for_entities_batch(entity_ids)
         else:
             slot_values_batch = {}
-
-        # Filter out None candidates
-        candidates = [c for c in candidates if c is not None]
-
+        
         for candidate in candidates:
             # Compute observed structural features
             candidate['u_struct_obs'] = self._compute_u_struct_obs(candidate)
@@ -192,9 +189,6 @@ class FeatureGenerator:
         This implements the comprehensive distance computation from attemp1TextOnly.py.
         """
 
-        if candidate is None:
-            return {'delta_sem': 1.0, 'delta_struct': 1.0, 'delta_terms': 1.0}
-
         # δ_sem: semantic distance (placeholder - would use actual subgraph embedding)
         delta_sem = max(0.0, 1.0 - candidate.get('retrieval_score', 0.0))
 
@@ -233,9 +227,6 @@ class FeatureGenerator:
         Compute structural distance based on checklist expectations.
         This implements the checklist-driven structural distance from attemp1TextOnly.py.
         """
-
-        if candidate is None:
-            return 1.0
 
         # Get observed structural features
         struct_obs = candidate.get('u_struct_obs', {})
@@ -279,9 +270,6 @@ class FeatureGenerator:
         Determine expected structural patterns for a candidate.
         This is a simplified version - in full implementation, this would come from checklist specifications.
         """
-
-        if candidate is None:
-            return {}
 
         subgraph = candidate.get('subgraph', {})
         facts = subgraph.get('facts', [])

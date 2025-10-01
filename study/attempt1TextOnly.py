@@ -1,32 +1,97 @@
 # %% [markdown]
-# # Bayesian Active Inference Decider
-# Build a decider that chooses: answer vs ask vs search, using entropy. 
-# Domain-agnostic but tested on movie knowledge.
+# # VEGETA
+# The goal with Vegeta is to build an agentic system that can pass the GAIA benchmark. 
+# We are using an **active Bayesian inference** approach with **predictive coding** on knowledge graph,
+# to have the system predict the next best action to take depending on an user input: ASK, SEARCH or ACT. 
+
+# The hypothesis is rather than use Language Models and extended 'thinking' to brute force to the solution 
+# (which still often doesn't work); we copy what humans do, which is *detect uncertainty* (gaps in our knowledge) 
+# and ask for clarification (when given a task for example) or search for missing knowledge.
+
+# Build a decider that chooses: answer vs ask vs search, using the free energy formula. When asking a question, it uses shannon entropy to 
+# determine the best question to ask. 
+# The project aims to be domain-agnostic but tested on movie knowledge.
 #
 # ## Theory Foundation: Bayesian Brain Model
-# The Bayesian brain maintains beliefs about hidden causes `v` of sensory data `u`. 
-# It generates predictions `u'` from beliefs via generative model `p(u|v)`, compares 
+# The Bayesian brain maintains beliefs about hidden causes `h` of sensory data `o`. 
+# It generates predictions `o'` from beliefs via generative model `p(o|h)`, compares 
 # to actual sensations, and updates beliefs to reduce prediction error.
 #
-# Exact Bayesian inference `p(v|u)` however, is intractable, so we use 
-# approximate posterior `q_φ(v)` and minimize variational free energy:
+# Exact Bayesian inference `p(h|o)` however, is intractable, so we use 
+# approximate posterior `q_φ(h)` and minimize variational free energy:
 # ```
-# F(φ) = KL[q_φ(v) || p(v)] - E_q[log p(u|v)]
+# F(φ) = KL[q_φ(h) || p(h)] - E_q[log p(o|h)]
 # ```
 # This balances complexity (stay close to prior) vs accuracy (explain data).
 
 # %% [markdown]
-# ## Glossary of symbols (concise)
-# - u: observed utterance features this turn (u_sem, u_terms, u_meta)
-# - u': predicted features from hypothesis v (u'_sem, u'_struct, u'_terms)
+# ## Quick Reference: The Bayesian Loop
+# ```
+# User utterance → o_t (observation)
+#                ↓
+#    Embed & extract → {o_sem, o_terms, o_struct_obs}
+#                ↓
+#    Retrieval (k-NN) → candidate subgraphs S_j
+#                ↓
+#    For each S_j, predict → o'_t = {o'_sem, o'_struct, o'_terms}
+#                ↓
+#    Compute likelihood → p(o_t | h_t = S_j) via δ_sem, δ_struct, δ_terms
+#                ↓
+#    Combine with prior → q(h_t) ∝ p(o_t | h_t) · p(h_t)
+#                ↓
+#    Measure uncertainty → H[q(h_t)], H[q(z_slot_r)]
+#                ↓
+#    Decide action → ANSWER / ASK(slot r) / SEARCH
+# ```
+
+# %% [markdown]
+# ## Notation Guide (Bayesian Brain → Implementation)
+# 
+# ### Theoretical Framework (Bayesian inference)
+# - **h_t**: hidden state at turn t (the true but unknown situation)
+#   - Implementation: h_t = {z_checklist, z_goal, z_subgraph, z_slot_r, z_dialogue_act, z_step, z_novelty}
+# - **o_t**: observed features at turn t (what the user said, measured)
+#   - Implementation: o_t = {o_sem, o_terms, o_struct_obs, o_meta}
+# - **o'_t**: predicted features given hypothesis h_t (what we expect to observe if h_t were true)
+#   - Implementation: o'_t = {o'_sem, o'_struct, o'_terms}
+# 
+# ### Variable Naming Convention
+# **During retrieval/selection (query context):**
+# - `q_sem`: user utterance embedding used as query vector (same as o_sem, different context)
+# - `sem_emb`: pre-computed semantic embeddings stored in graph nodes (retrieval targets)
+# - `s_sem`: similarity scores from k-NN retrieval (cosine between q_sem and sem_emb)
+# - `s_graph`: graph-structure similarity scores from k-NN on graph embeddings
+# 
+# **During inference (likelihood computation):**
+# - `o_sem`: observed utterance semantic embedding (o_t.sem)
+# - `o_terms`: observed keywords/entities from utterance (o_t.terms)
+# - `o_struct_obs(S_j)`: observed structure counts in candidate subgraph S_j (o_t.struct)
+# - `o'_sem(S_j)`: expected semantic embedding for candidate S_j (o'_t.sem)
+# - `o'_struct(S_j)`: expected structure from checklist for S_j (o'_t.struct)
+# - `o'_terms(S_j)`: expected terms if S_j is correct (o'_t.terms)
+# 
+# ### Other symbols
+# - t: turn index
 # - S_j: candidate subgraph j
-# - δ_sem, δ_struct, δ_terms: per-channel distances used in the likelihood
-# - σ_sem², σ_struct², σ_terms²: noise variances per channel (aleatoric)
-# - α, β, γ: channel weights inside the log-likelihood
+# - δ_sem, δ_struct, δ_terms: per-channel distances (observed vs predicted)
+# - σ_sem², σ_struct², σ_terms²: noise variances per channel (aleatoric uncertainty)
+# - α, β, γ: channel weights in log-likelihood
 # - τ_retrieval: temperature for retrieval/candidate prior softmax
-# - τ_posterior: temperature when normalizing p(u|v)·p(v) into q(v)
+# - τ_posterior: temperature when normalizing p(o_t|h_t)·p(h_t) into q(h_t)
 # - H[·]: Shannon entropy; EIG: expected information gain
-# - R: retrieval context (anchors, params, candidates, provenance)
+# - R_t: retrieval context at turn t (anchors, params, candidates, provenance)
+# 
+# ### Complete Mapping Table
+# | Concept | Classic | Time-indexed | Implementation |
+# |---------|---------|--------------|----------------|
+# | **Hidden state** | h | h_t | {z_checklist, z_subgraph, z_slot_r, ...} |
+# | **Observation** | o | o_t | {o_sem, o_terms, o_struct_obs, o_meta} |
+# | **Prediction** | o' | o'_t | {o'_sem, o'_struct, o'_terms} |
+# | **Prior** | p(h) | p(h_t) | p(z_checklist)·p(z_goal\|...)·... |
+# | **Likelihood** | p(o\|h) | p(o_t\|h_t) | exp(-[α·δ_sem + β·δ_struct + γ·δ_terms]) |
+# | **Posterior** | q(h) | q(h_t) | Softmax(log p(o_t\|h_t) + log p(h_t)) |
+# | **Belief state** | - | b_t | q_t(h_t) stored in session |
+# | **Free energy** | F | F_t | KL[q(h_t)\|\|p(h_t)] - E_q[log p(o_t\|h_t)] |
 
 # %% [markdown]
 # ## Setup
@@ -40,44 +105,62 @@
 # add relation aware embeddings with GDS (fastRP, node2vec, graphSAGE, etc) into node property
 
 # %% [markdown]
-# # Process user utterance
-# 1) **Extract entities/keywords (LLM-first JSON)**
-#    - Call a small 4B LLM in JSON/function mode to return:
+# # Process user utterance (o_t → o_sem, o_terms)
+# 1) **Extract entities/keywords (LLM JSON-structured output)**
+#    - Call a small 4B LLM  to return:
 #      { canonical_terms (≤15), entities [{surface, normalized, type}], numbers, dates }.
-#    - Validate against a strict JSON schema; on failure: retry with "JSON only" prompt; on second failure: fall back to a minimal rule-based extractor for this turn.
+#    - Validate against a strict JSON schema.
 #    - Canonicalize: lowercase, lemmatize, dedupe; keep at most 15 canonical_terms.
 #    - These canonical_terms feed δ_terms (likelihood). The linked entities (below) feed retrieval only.
 # Outputs: {canonical_terms_set, entities[], numbers[], dates[]}
 # %% [markdown]
-# 2) **Make `u_terms`**:
-#    - **Set form:** `u_terms_set` = canonical_terms_set.
-#      δ_terms default = 1 − Jaccard(u_terms_set, expected_terms_set(S_j)).
-#      Fallback (tiny sets, min size < 3): δ_terms = 0.5·(1−Jaccard) + 0.5·(1−cosine(avg(term_embeddings))).
-#    - **Vector form (optional):** embed each term; average → `u_terms_vec` for the fallback cosine.
-# Outputs: {u_terms_set, optional u_terms_vec}
+# 2) **Make `o_terms`**:
+#    - **Set form:** `o_terms_set` = canonical_terms_set.
+#      δ_terms default = 1 − Jaccard(o_terms_set, expected_terms_set(S_j)).
+# Outputs: {o_terms_set}
 # %% [markdown]
-# 3) **Link to graph when possible** (symbolic lookup)
-#    - For each extracted entity.normalized, query Neo4j full-text over :Entity(name, aliases).
+# 3) **Link to graph ** (symbolic lookup)
+#    - For each extracted entity. normalized, query Neo4j full-text over :Entity(name, aliases).
 #    - Keep top 1–3 entity ids per entity if scores pass a small threshold; else leave as raw string.
 #
 # Notes:
 # - δ_terms is a likelihood component only. Retrieval scores must not be reused inside the likelihood.
 # - Outputs feed two places:
 #     (a) **Retrieval (R):** linked_entity_ids boost anchors alongside semantic kNN.
-#     (b) **Likelihood (later):** u_terms_set (and optional u_terms_vec) drive the terms channel.
+#     (b) **Likelihood (later):** o_terms_set (and optional o_terms_vec) drive the terms channel.
 
 ###############################################################################################################
 # %% [markdown]
 # # Selective activation
 # ## Initial subgraph anchor candidates
-# 1) Take the embedded user utterance -> q_sem (e.g., 768-dim using nomic-text-embed via ollama).
-# 2) k-NN **against sem_emb** to get initial recall scores s_sem.            [index: idx_sem, metric: cosine]
+# 1) Embed user utterance → o_sem (e.g., 768-dim using nomic-embed-text via ollama).
+# 2) Use o_sem as query vector (q_sem) for k-NN **against sem_emb** (node embeddings in DB) 
+#    to get initial recall scores s_sem.                                        [index: idx_sem, metric: cosine]
 # 3) For reranking, k-NN **against graph_emb** to get s_graph.                 [index: idx_graph, metric: cosine]
 # 4) Normalize scores (z-score per list), then combine:
 #       s_combined = 0.7 * z_sem + 0.3 * z_graph
-#    Note: temperature τ is used later only when forming p(z_subgraph|anchors) via softmax; not here.
+#    Note: temperature τ is used later only when forming p(h_t|anchors) via softmax; not here.
 #    Clarification: τ_retrieval denotes the retrieval softmax temperature used for p(z_subgraph|anchors).
 # 5) Rank by s_combined and take top-K anchor nodes.                           [K = 10]
+# 
+# **Note:** q_sem and o_sem are the same vector; q_sem just emphasizes we're using it as a query.
+#
+# ## Checklist & Procedure Extraction (binary decision during retrieval)
+# During selective activation, we also determine if a **procedural checklist** applies:
+# - Detect if :Checklist nodes in Neo4j are similar to the user utterance
+# - If semantic/structural similarity to a checklist with HAS_STEP relations exceeds threshold (e.g., 0.65):
+#   → **Extract procedure = TRUE**, activate that checklist, initialize z_step to first step
+# - Else: **Extract procedure = FALSE**, z_checklist may still be inferred (non-procedural), z_step = None
+#
+# This is an **all-or-nothing commitment** based on brain model: when humans recognize a familiar procedure
+# (mortgage application, recipe, troubleshooting), we switch to procedural mode and follow the script.
+# When we don't recognize one, we fall back to flexible inference.
+#
+# Implementation detail:
+# - Store extracted_procedure flag in session state
+# - If TRUE: policy uses step-gating (only ask/search for REQUIRES of current step)
+# - If FALSE: policy is purely EIG-driven across all slots
+# - Re-evaluate this flag only on major topic shifts (detected via semantic distance drop)
 
 # %% [markdown]
 # ## Neighborhood signature (for subgraph vectors)
@@ -106,18 +189,73 @@
 # ## Score candidate subgraphs
 # Guard: retrieval-derived signals live only in priors; likelihood compares observed vs expected channels.
 # For each candidate subgraph S_j, use the likelihood pieces directly (single source of truth):
-# - δ_sem    = 1 - cosine(u_sem, u'_sem(S_j))
-# - δ_struct = || log1p(u_struct_obs(S_j)) − log1p(u'_struct(S_j)) ||_2
-# - δ_terms  = 1 − Jaccard(u_terms_set, expected_terms_set(S_j)); if min set size < 3, use 0.5·(1−Jaccard) + 0.5·(1−cosine(avg(term_embeds)))
+# - δ_sem    = 1 - cosine(o_sem, o'_sem(S_j))
+# - δ_struct = || log1p(o_struct_obs(S_j)) − log1p(o'_struct(S_j)) ||_2
+# - δ_terms  = 1 − Jaccard(o_terms_set, expected_terms_set(S_j)); if min set size < 3, use 0.5·(1−Jaccard) + 0.5·(1−cosine(avg(term_embeds)))
 # - penalties: +0.3 per missing required slot; hubbiness penalties (degree caps, detour penalties)
 #
 # Define the log-likelihood-based score used for ranking:
-#   log p(u | v = S_j) = - [ α * δ_sem / σ_sem²
+#   log p(o | h = S_j) = - [ α * δ_sem / σ_sem²
 #                         + β * δ_struct / σ_struct²
 #                         + γ * δ_terms / σ_terms²
 #                         + penalties ]  + const
 #
-# Use this as the only scoring function for candidate ranking. 
+# Use this as the only scoring function for candidate ranking.
+#
+# ### Likelihood Function Clarification (implementation pseudocode)
+# ```python
+# def log_likelihood(o_t, o_prime_t, sigma_sq, alpha, beta, gamma, penalties):
+#     """
+#     Compute log p(o_t | h_t = S_j) for candidate subgraph S_j.
+#     
+#     Args:
+#         o_t: observed features {sem, struct_obs, terms_set}
+#              → implementation: {o_sem, o_struct_obs(S_j), o_terms}
+#         o_prime_t: predicted features from S_j {sem, struct_expected, terms_set}
+#              → implementation: {o'_sem(S_j), o'_struct(S_j), o'_terms(S_j)}
+#         sigma_sq: dict {sem: float, struct: float, terms: float}
+#         alpha, beta, gamma: channel weights
+#         penalties: total penalty score
+#     
+#     Returns:
+#         log_likelihood ∈ (-∞, 0]  (0 = perfect match)
+#     """
+#     # Semantic channel: cosine distance ∈ [0, 1]
+#     # δ_sem = 1 - cos(o_sem, o'_sem(S_j))
+#     delta_sem = 1.0 - cosine_similarity(o_t.sem, o_prime_t.sem)  # both L2-normalized
+#     
+#     # Structural channel: L2 on log-counts, normalized to [0, 1]
+#     # δ_struct = ||log(o_struct_obs) - log(o'_struct)||
+#     struct_obs_log = np.log1p(o_t.struct_obs)  # observed counts in S_j
+#     struct_exp_log = np.log1p(o_prime_t.struct_expected)  # checklist expectations
+#     delta_struct = np.linalg.norm(struct_obs_log - struct_exp_log)
+#     delta_struct = np.clip(delta_struct / MAX_STRUCT_NORM, 0, 1)  # normalize, MAX_STRUCT_NORM ≈ 5.0
+#     
+#     # Terms channel: Jaccard or blended ∈ [0, 1]
+#     # δ_terms = 1 - Jaccard(o_terms, o'_terms(S_j))
+#     min_set_size = min(len(o_t.terms_set), len(o_prime_t.terms_set))
+#     if min_set_size >= 3:
+#         delta_terms = 1.0 - jaccard(o_t.terms_set, o_prime_t.terms_set)
+#     else:
+#         # Fallback for tiny sets: blend Jaccard with cosine of term embeddings
+#         jacc = jaccard(o_t.terms_set, o_prime_t.terms_set)
+#         cos = cosine_similarity(avg_embed(o_t.terms_set), avg_embed(o_prime_t.terms_set))
+#         delta_terms = 0.5 * (1 - jacc) + 0.5 * (1 - cos)
+#     
+#     # Combine channels (Gaussian noise model)
+#     raw_score = - (alpha * delta_sem / sigma_sq['sem']
+#                  + beta * delta_struct / sigma_sq['struct']
+#                  + gamma * delta_terms / sigma_sq['terms']
+#                  + penalties)
+#     
+#     # Constant term (log normalizer) cancels when comparing candidates, omit or set to 0
+#     return raw_score  # ∈ (-∞, 0]
+# ```
+# **Key properties:**
+# - All δ values are in [0,1] by construction → prevents scale mismatches
+# - Higher σ² = more forgiving (wider noise tolerance)
+# - Penalties are additive in the exponent (equivalent to multiplying likelihood by exp(-penalty))
+# - This is the **single source of truth** for scoring; do not create separate ranking functions 
 
 # %% [markdown]
 # ### Penalty definitions (plain language)
@@ -140,20 +278,20 @@
 # ## Carry forward top-M candidates (no early collapse)
 # By 'candidate (M)' we mean a subgraph with a set of nodes and relationships.
 # - Keep top-M by score(S) (e.g., M=10–50). Do not pick a single winner yet.
-# - Persist these candidates and their features to be used when computing the likelihood p(u|v) and the posterior q(z_subgraph).
+# - Persist these candidates and their features to be used when computing the likelihood p(o|h) and the posterior q(z_subgraph).
 # - Optional: lightweight reranking to improve the top-M ordering without collapsing.
 
 # %% [markdown]
 # ## Retrieval context R (definition)
 # We denote the retrieval context as R:
-# - R = {anchors, expansion params, candidate subgraphs S_j, vec_subgraph(S_j), u_struct_obs(S_j), provenance}
-# - R is only used to build priors and per-candidate features, not part of observation u.
-# - Used for: p(z_subgraph|anchors), slot priors, u_struct_obs(S_j), vec_subgraph(S_j).
+# - R = {anchors, expansion params, candidate subgraphs S_j, vec_subgraph(S_j), o_struct_obs(S_j), provenance}
+# - R is only used to build priors and per-candidate features, not part of observation o_t.
+# - Used for: p(z_subgraph|anchors), slot priors, o_struct_obs(S_j), vec_subgraph(S_j).
 
 # %% [markdown]
 # ## Keep a retrieval log (provenance)
 # Persist (JSON):
-# - session_id, turn_id, timestamp, utterance_raw, u_terms_set
+# - session_id, turn_id, timestamp, utterance_raw, o_terms_set
 # - anchors: [{node_id, s_sem, s_graph, s_combined}], expansion params
 # - candidates: [{subgraph_id, size, provenance_score}]
 # - posterior summary: top‑K q(z_subgraph), slot entropies, channel deltas per candidate, novelty signals
@@ -171,16 +309,24 @@
 # - τ_retrieval (retrieval softmax temperature) = 0.7
 # - τ_posterior (posterior softmax temperature) = 0.7
 # - N_terms_max (canonical utterance terms) = 15
-# - N_expected (cap for u'_terms) = 20
+# - N_expected (cap for o'_terms) = 20
 # - small_set_threshold = 3; small_set_blend = 0.5
 # - λ_missing = 0.30; d_cap = 40; λ_hub = 0.02
 
 ###############################################################################################################
 # %% [markdown]
-# # Creating the prior (v)
-# We keep a belief over hidden causes/states (v) that could explain the user's utterance.
-
-# Hidden states: z_checklist, z_goal, z_subgraph, z_slot_r, z_dialogue_act, z_step, z_novelty. The “actual but unknown” situation this turn.
+# # Creating the prior p(h_t) over hidden states
+# We keep a belief over hidden causes/states h_t that could explain the user's utterance.
+# Include optional procedure fields in x: procedure_active ∈ {0,1}, step ∈ Steps ∪ {None}
+# 
+# Hidden state components (h_t):
+# - z_checklist: which task template applies (e.g., MovieQuery, LoanApp, None)
+# - z_goal: user's intent (identify, recommend, verify, explore, act)
+# - z_subgraph: which candidate subgraph S_j explains the utterance
+# - z_slot_r: value for each required slot r
+# - z_dialogue_act: conversational move (clarify, confirm, request, provide)
+# - z_step: current procedure step (if checklist has HAS_STEP relations)
+# - z_novelty: out-of-distribution flag (low/high)
 
 # ## Where do the priors come from?
 # z_checklist prior & z_subgraph prior are fed from selective activation step: 
@@ -198,13 +344,119 @@
 # 7) p(z_novelty | anchors, distances): are we out-of-distribution (i.e., probably need SEARCH)?
 
 # %% [markdown]
+# ## Cold Start Priors (t=0, no history)
+# When the session begins (turn 0), we have no previous posteriors to carry forward.
+# Initialize all priors from base rates and the first utterance:
+#
+# **p_0(z_checklist):**
+# - Uniform over {common checklists + None}, weighted by global frequency
+# - If domain is known from context (e.g., URL, user profile), boost relevant checklists
+# - Always keep p_0(z_checklist = None) ≥ 0.15 to avoid forced fits
+# - Example: p_0 = {MovieQuery: 0.25, LoanApp: 0.10, None: 0.15, ...normalize...}
+#
+# **p_0(z_goal):**
+# - Run intent classifier on first utterance only (no history)
+# - Use uniform prior over {identify, recommend, verify, explore, act} if classifier fails
+# - Apply checklist↔goal compatibility Ψ after checklist is inferred
+#
+# **p_0(z_subgraph):**
+# - Purely from retrieval scores (selective activation)
+# - No recency boost (nothing is recent yet)
+# - Use simplicity + provenance only: smaller, well-sourced subgraphs slightly favored
+# - Softmax over anchor scores with τ_retrieval
+#
+# **p_0(z_step):**
+# - If procedure extracted: z_step = first step in HAS_STEP chain (order=1)
+# - Else: z_step = None
+#
+# **p_0(z_slot_r):**
+# - Uniform over available fillers in candidate subgraphs + UNKNOWN
+# - Weight by popularity (degree centrality) if filler appears in multiple candidates
+# - Type constraints enforced: impossible types get p=0
+#
+# **p_0(z_dialogue_act):**
+# - Heuristics only (no dialogue history):
+#   - Question marks / wh-words → request or clarify
+#   - Declarative + entity → provide
+#   - Default: uniform over {clarify: 0.3, request: 0.4, provide: 0.2, confirm: 0.1}
+#
+# **p_0(z_novelty):**
+# - Check if max(cosine(o_0.sem, all_known_embeddings)) < 0.35 → high novelty
+# - Mahalanobis distance to embedding cluster > 3σ → high novelty
+# - Default: p_0(novelty=low) = 0.7, p_0(novelty=high) = 0.3
+#
+# **Transition to t=1:**
+# After first action (ANSWER/ASK/SEARCH), update to q_0(·) using Bayes rule,
+# then use q_0 as input to p_1 via carryover (see "Lifecycle of posterior" section).
+
+# %% [markdown]
+# ## Checklist Definition (graph schema)
+# Checklists are reusable templates stored in Neo4j that define typed requirement sets for answering specific questions.
+# They serve as explicit procedural memory that can be introspected and improved over time.
+# (See docs/ontology.md for full specification)
+#
+# **Structure:**
+# - `:Checklist {name, description}` — e.g., "IdentifyFilm", "AssessCyberRisk"
+# - `:SlotSpec {name, expect_labels, rel, required, cardinality}` — individual requirements
+# - Relationship: `(:Checklist)-[:REQUIRES]->(:SlotSpec)`
+#
+# **SlotSpec properties:**
+# - `name`: slot identifier (e.g., "film", "year", "applicant")
+# - `expect_labels`: array of node labels expected (e.g., ["Film"], ["Person"])
+# - `rel`: relationship type to validate (e.g., "INSTANCE_OF", "ACTED_IN")
+# - `required`: boolean (true = must be filled for complete answer)
+# - `cardinality`: "ONE" or "MANY" (how many fillers expected)
+#
+# ### Example: IdentifyFilm checklist
+# ```cypher
+# CREATE (:Checklist {name: "IdentifyFilm", description: "Determine which specific film the user is asking about"})
+# CREATE (:SlotSpec {name: "film", expect_labels: ["Film"], rel: "INSTANCE_OF", required: true, cardinality: "ONE"})
+# CREATE (:SlotSpec {name: "year", expect_labels: ["Year","Date"], rel: "RELEASED_IN", required: false, cardinality: "ONE"})
+# CREATE (:SlotSpec {name: "director", expect_labels: ["Person"], rel: "DIRECTED_BY", required: false, cardinality: "ONE"})
+# CREATE (:SlotSpec {name: "actor", expect_labels: ["Person"], rel: "ACTED_IN", required: false, cardinality: "MANY"})
+#
+# MATCH (c:Checklist {name: "IdentifyFilm"}), (s:SlotSpec) WHERE s.name IN ["film", "year", "director", "actor"]
+# CREATE (c)-[:REQUIRES]->(s)
+# ```
+#
+# ### Example: Procedural checklist with steps
+# ```cypher
+# CREATE (:Checklist {name: "LoanApplication", description: "Multi-step loan application workflow"})
+# CREATE (:SlotSpec {name: "applicant", expect_labels: ["Person"], required: true, cardinality: "ONE"})
+# CREATE (:SlotSpec {name: "amount", expect_labels: ["Currency"], required: true, cardinality: "ONE"})
+# CREATE (:SlotSpec {name: "income", expect_labels: ["Currency"], required: true, cardinality: "ONE"})
+#
+# CREATE (:Step {name: "CollectBasicInfo", order: 1})
+# CREATE (:Step {name: "AssessEligibility", order: 2})
+#
+# MATCH (c:Checklist {name: "LoanApplication"}), (s:SlotSpec) WHERE s.name IN ["applicant", "amount", "income"]
+# CREATE (c)-[:REQUIRES]->(s)
+#
+# MATCH (c:Checklist {name: "LoanApplication"}), (step1:Step {order: 1}), (step2:Step {order: 2})
+# CREATE (c)-[:HAS_STEP]->(step1)
+# CREATE (step1)-[:REQUIRES {slot: "applicant"}]->()
+# CREATE (step1)-[:REQUIRES {slot: "amount"}]->()
+# CREATE (step1)-[:NEXT_IF {condition: "has(applicant) AND has(amount)"}]->(step2)
+# ```
+#
+# **Benefits:**
+# - Explicit "completeness" definition for each task type
+# - Introspectable reasoning (why did we ask X?)
+# - Foundation for learned policies that skip steps when confidence is high
+# - Clear separation from world model (no ghost edges in entity graph)
+#
+# **Extraction during retrieval:**
+# If semantic/structural similarity to a checklist template exceeds threshold (e.g., 0.65),
+# activate that checklist and its procedure graph (if HAS_STEP relations exist).
+
+# %% [markdown]
 # ## Prior over checklist p(z_checklist)
 # What kind of problem are we trying to solve? (pick the playbook):
 # Examples: LoanApplication vs MovieQuery vs EligibilityCheck vs None.
 # - **Frequency**: which checklists are common in our logs. (Counts → probabilities)
 # - **Recency/context**: things discussed in the last few turns get a boost (with time decay).
-# - **User profile**: tiny nudge if we know the user’s domain.
-# - **Null option**: always keep “none-of-the-above” nonzero to avoid forcing a bad fit.
+# - **User profile**: tiny nudge if we know the user's domain.
+# - **Null option**: always keep "none-of-the-above" nonzero to avoid forcing a bad fit.
 
 # %% [markdown]
 # ## Prior over goal p(z_goal | history)
@@ -247,6 +499,14 @@
 # - Why it helps (gating):
 #   - Ask only for slots that **unlock the current step** (missing REQUIRES).
 #   - Prefer SEARCH when the step requires public facts; ASK when private facts are missing.
+#   - MOMDP consistency note:
+#       - Steps live in observed x. When no procedure applies: x.procedure_active=0 and x.step=None.
+#       - T_x handles both cases (advance when REQUIRES met; else identity; identity when step=None).
+#       - We always keep belief only over hidden y and use action-conditioned O; gating is a policy choice, not a model constraint.
+# Step gating toggle:
+# - has_procedure = (z_checklist != None) and (z_step != None)
+# - When has_procedure == True → gate ASK/SEARCH to actions that satisfy REQUIRES(current_step) or unlock NEXT_IF.
+# - When False → no gating; use EIG to choose the single highest information question.
 # - Result: fewer, more surgical questions; faster path to a decision.
 # - Procedure-agnostic fallback (simple):
 #   - Treat z_step as an always-on prior feature. If no procedure applies, set its score to 0.
@@ -271,7 +531,7 @@
 # ## Novelty/OOD prior p(z_novelty)
 # Does this look outside of our comfort zone? (do we even have the right playbook, or should we go look stuff up?):
 # - Heuristics:
-#   - max cosine(u_sem, anchors) < 0.35 → novelty high (Low max similarity to all anchors)
+#   - max cosine(o_sem, anchors) < 0.35 → novelty high (Low max similarity to all anchors)
 #   - Mahalanobis distance to global embedding mean/cov > 3 → novelty high (High distance from known cluster)
 #   - poor checklist likelihood (utterance doesn’t fit any checklist language).
 # - Effect: raise p(z_novelty), bump σ² across channels, bias policy toward SEARCH.
@@ -280,65 +540,76 @@
 #################################################################################
 
 # %% [markdown]
-# # Observation (u) (external)
-# - u_sem: utterance embedding (what the user said, as a vector)
-# - u_terms : utterance keywords/entities (bag of terms OR an embedding of that bag)
-# - u_meta  : short history summary, time, user prefs (used to bias priors; not scored directly)
+# # Observation o_t (what we measure from the user's input)
+# 
+# Theoretical: o_t is the observed feature vector at turn t
+# 
+# Implementation components:
+# - **o_sem**: utterance semantic embedding (768-dim vector from nomic-embed-text)
+#   - What the user said, encoded as dense vector
+# - **o_terms**: utterance keywords/entities (canonical_terms_set, size ≤ 15)
+#   - Extracted via LLM, canonicalized (lowercase, lemmatized, deduped)
+# - **o_struct_obs(S_j)**: observed structure counts in candidate subgraph S_j
+#   - Counts of node labels and edge types actually present in S_j
+#   - Measured AFTER retrieval, specific to each candidate
+# - **o_meta**: context metadata (history summary, time, user prefs)
+#   - Used to bias priors only; NOT scored in likelihood
 #
-# This is the "sensory data" we compare against u' from the generative model.
-
-# ## Per-candidate observed structure (measured AFTER retrieval)
-# - u_struct_obs(S_j): what we actually see in candidate S_j
-# -- (counts of node labels, edge-types, simple cardinalities in that subgraph)
+# **Mapping:** o_t = {o_sem, o_terms, o_struct_obs(S_j), o_meta}
 
 # %% [markdown]
-# ## Plug-in map (where each thing plugs in)
-# - u_sem: utterance embedding → used in δ_sem vs u′_sem(S_j)
-# - u_terms_set / u_terms_vec: utterance terms → used in δ_terms vs expected_terms(S_j)
-# - u_meta: history/preferences/time → only biases priors, not likelihood
-# - R (anchors, S_j): used to build p(z_subgraph|anchors), u_struct_obs(S_j), vec_subgraph(S_j), slot priors; R is not observation
-# - u_struct_obs(S_j): observed counts inside S_j → used in δ_struct vs u′_struct(S_j)
+# ## Where each component is used:
+# - **o_sem** → δ_sem channel: distance to o'_sem(S_j)
+# - **o_terms** → δ_terms channel: Jaccard/cosine to o'_terms(S_j)
+# - **o_struct_obs(S_j)** → δ_struct channel: L2 distance to o'_struct(S_j)
+# - **o_meta** → prior biasing only (not in likelihood)
+# - **R_t** (retrieval context: anchors, S_j candidates) → builds priors, slot distributions
+#   - R_t is NOT part of observation o_t
 
 #################################################################################
 
 #################################################################################
 
 # %% [markdown]
-# # Prediction of u' = g(v) (what we *expect* to observe if v were true):
-# Think of g(v) as a simple, deterministic *predictor* that spits out "expected observation features."
-#    - Semantic: subgraph embedding (pooled node vecs ⊕ structure sketch), expected key terms.
-#    -- Key terms are:
-#    --- Names/aliases from nodes in the candidate subgraph (entities, types).
-#    --- Relation names (RelationType) and slot names (“applicant,” “release year”).
-#    --- Checklist-specific lexicon (“interest rate,” “eligibility,” “recommend,” “similar”).
-#    --- Optional: top TF-IDF tokens from documents linked via HAS_SOURCE.
-#    --- Other consideration: use LLM fed from this data to propose a set of possible key terms, and even better, questions.
-#    -- We'll:
-#    --- Create a small expected-term vector (bag of words or an embedding of those terms), capped to top N_expected terms.
-#    --- Compare to the utterance terms/embedding as part of the likelihood
-
-#    - Structure: which required slots/edges should be present (from the Checklist).
-#    - Noise model: how forgiving we are (σ²), so small mismatches aren’t catastrophic.
-
-# %% [markdown]
-# Not a giant neural decoder. Just structured expectations you can check against reality.
-#
-# We'll output three channels:
-#   u'_sem   = expected semantic vector for the candidate subgraph
-#             - Weighted pooling of node embeddings in the candidate subgraph
-#             - ⊕ concat with the small structure vector
-#             - Normalize
-
-#   u'_struct = expected structure sketch (counts/patterns of types/edges)
-#             - Counts of node labels and edge types required by the Checklist
-#             - Plus any cardinality expectations (ONE vs MANY)
-#   u'_terms = expected key terms/phrases likely to appear in the utterance
-#             - Bag of expected tokens from node names/aliases, slot/rel labels, checklist lexicon
-#             - Cap size to N_expected (e.g., 20), dedupe, lowercase, lemmatize/stem
-#             - Optionally embed this small list to compare with utterance embedding
-#             - Optionally use LLM to propose a set of possible key terms, and even better, questions.
-#
-# Then the likelihood compares (u_sem, u_struct, u_terms) vs (u'_sem, u'_struct, u'_terms) with a noise model.
+# # Prediction o'_t = g(h_t) (what we expect to observe if hypothesis h_t were true)
+# 
+# Theoretical: o'_t is the predicted feature vector given hidden state h_t
+# 
+# Think of g(h_t) as a simple, deterministic *predictor* that generates expected observations.
+# For a candidate subgraph S_j (h_t includes z_subgraph = S_j), we predict:
+# 
+# Implementation components:
+# 
+# **1) o'_sem(S_j)** - Expected semantic embedding:
+#   - Weighted pooling of node embeddings in candidate subgraph S_j
+#   - Concatenate with structure vector (label/edge-type counts)
+#   - L2-normalize the result
+#   - Dimensions: same as o_sem (768-dim)
+# 
+# **2) o'_struct(S_j)** - Expected structure pattern:
+#   - Counts of node labels and edge types REQUIRED by the Checklist
+#   - Cardinality expectations (ONE vs MANY per slot)
+#   - What SHOULD exist in a complete answer
+# 
+# **3) o'_terms(S_j)** - Expected key terms:
+#   - Sources:
+#     * Names/aliases from nodes in S_j
+#     * Relation names (edge types like ACTED_IN, DIRECTED_BY)
+#     * Slot names from checklist ("applicant," "release year")
+#     * Checklist-specific lexicon ("interest rate," "eligibility")
+#     * Optional: TF-IDF tokens from linked documents (HAS_SOURCE)
+#     * Optional: LLM-generated terms for this subgraph
+#   - Processing:
+#     * Dedupe, lowercase, lemmatize/stem
+#     * Cap to N_expected terms (e.g., 20)
+#     * Store as set or embed for cosine comparison
+# 
+# **Mapping:** o'_t = {o'_sem(S_j), o'_struct(S_j), o'_terms(S_j)}
+# 
+# Then likelihood compares observed vs predicted:
+# - δ_sem = 1 - cos(o_sem, o'_sem)
+# - δ_struct = ||log(o_struct_obs) - log(o'_struct)||
+# - δ_terms = 1 - Jaccard(o_terms, o'_terms)
 
 # Normalize channels before weighting:
 # - δ_sem: clamp to [0,1] (cosine distance on L2-normalized vectors).
@@ -347,18 +618,23 @@
 # Calibrate α, β, γ so terms contribute similarly on a validation set.
 
 # %% [markdown]
-# # 2) g(v) — predicted channels we compare against u
-# For a hypothesis v ≈ {z_checklist, z_subgraph[, z_slot_r, z_goal]}:
-# - u'_sem(S_j)    : pooled node embeddings ⊕ structure vector (concat, then normalize)
-# - u'_struct(S_j) : expected slot/edge pattern from the Checklist (what SHOULD exist)
-# - u'_terms(S_j)  : expected key terms (names/aliases from nodes, relation words, checklist lexicon)
+# # Summary: g(h_t) → o'_t (prediction function)
+# For a hypothesis h_t where z_subgraph = S_j:
+# 
+# **Predicted channels:**
+# - o'_sem(S_j)    : pooled node embeddings ⊕ structure vector → L2-normalize
+# - o'_struct(S_j) : expected slot/edge counts from Checklist (what SHOULD exist)
+# - o'_terms(S_j)  : expected terms (names/aliases, relation types, slot names, lexicon)
 #
-# Likelihood uses per-channel distances:
-# - δ_sem    = 1 - cosine(u_sem, u'_sem)
-# - δ_struct = distance(u_struct_obs(S_j), u'_struct)          # e.g., L2 on counts, penalties for required-missing
-# - δ_terms  = 1 - JaccardOverlap OR 1 - cosine(term-embeds)
-# Then combine with weights and noise σ².
-# This likelihood is the single source of truth; the candidate scoring section uses this exact definition.
+# **Likelihood via per-channel distances:**
+# - δ_sem    = 1 - cosine(o_sem, o'_sem(S_j))
+# - δ_struct = ||log(o_struct_obs(S_j)) - log(o'_struct(S_j))||  [+ penalties for missing required]
+# - δ_terms  = 1 - Jaccard(o_terms, o'_terms(S_j))  [or blended with cosine for small sets]
+# 
+# **Combined likelihood:**
+# log p(o_t | h_t) = -[α·δ_sem/σ_sem² + β·δ_struct/σ_struct² + γ·δ_terms/σ_terms² + penalties]
+# 
+# This is the single source of truth for candidate scoring.
 
 
 # For each channel, we'll apply our noise model σ²:
@@ -371,7 +647,7 @@
 # Very long, specific utterance → decrease σ² (be stricter).
 # Likelihood shape (conceptually):
 
-# log p(u | v) = - [ α * δ_sem / σ_sem²
+# log p(o | h) = - [ α * δ_sem / σ_sem²
 #                 + β * δ_struct / σ_struct²
 #                 + γ * δ_terms / σ_terms²
 #                 + penalties ]  + const
@@ -387,52 +663,70 @@
 # do not maintain a separate scoring formula.
 
 # %% [markdown]
-# # Posterior
-# ## q(.) = your approximate posterior over the hidden states (our current belief after looking at the evidence)
-# factorised q
-#  q(v) = q(z_checklist)
+# # Posterior q(h_t | o_t)
+# ## Approximate posterior over hidden states (our updated belief after seeing evidence o_t)
+# 
+# We maintain a factorized posterior distribution:
+# 
+# q(h_t) = q(z_checklist)
 #        · q(z_goal | z_checklist, history)
 #        · q(z_subgraph | z_checklist, anchors)
-#        · q(z_step | z_checklist, z_goal, history)    # optional; if None, drop this factor
-#        · ∏_r q(z_slot_r | z_subgraph, z_step)        # condition on z_step when present; else on z_subgraph only
-#        · q(z_dialogue_act | history, utterance)
+#        · q(z_step | z_checklist, z_goal, history)    # optional; None if no procedure
+#        · ∏_r q(z_slot_r | z_subgraph, z_step)        # for each required slot r
+#        · q(z_dialogue_act | history, o_t)
 #        · q(z_novelty | anchors, distances)
+# 
+# Each factor is a probability distribution over possible values of that hidden variable.
 
 #################################################################################
 
 # %% [markdown]
-# # Variational update (free energy view)
-# We keep an approximate posterior q(v) over checklists/subgraphs/slots.
-# We minimize free energy to balance "fit the data" vs "don’t overfit":
+# # Variational update (free energy minimization)
+# We maintain approximate posterior q(h_t) and update it by minimizing free energy.
 # 
-#   F = KL[q(v) || p(v)] - E_q[ log p(u | v) ]
+# **Free energy:**
+#   F = KL[q(h_t) || p(h_t)] - E_q[log p(o_t | h_t)]
 # 
-# Intuition:
-# - If the data fits badly, E_q[log p(u|v)] is low → F goes up → we must change beliefs.
-# - If we move too far from the prior without evidence, KL goes up → F goes up.
-# - We descend F to update q(v).                                           [simple gradient or discrete reweighting]
-#
-# In practice: normalize p(u|v) * p(v) across candidates to get q(v).      [softmax with temperature τ]
-# Clarification: use τ_posterior here; τ_retrieval is used only for retrieval prior.
+# **Intuition:**
+# - **Accuracy term:** E_q[log p(o_t | h_t)] measures how well our beliefs explain the observation
+#   - Low → data doesn't match beliefs → F increases → must update
+# - **Complexity term:** KL[q(h_t) || p(h_t)] measures deviation from prior
+#   - High → beliefs moved far from prior without evidence → F increases
+# - We minimize F to balance fitting data vs staying grounded in priors
+# 
+# **Implementation (discrete case):**
+# For each candidate hypothesis (e.g., subgraph S_j):
+#   q(h_t = S_j) ∝ p(o_t | h_t = S_j) · p(h_t = S_j)
+# 
+# Normalize via softmax with temperature τ_posterior:
+#   q(h_t = S_j) = exp(log p(o_t|S_j) + log p(S_j)) / Z
+# 
+# **Note:** Use τ_posterior for posterior inference; τ_retrieval is only for retrieval priors.
 
 # %% [markdown]
 # # Quantifying uncertainty (what do we know, what do we not?)
 # We need numbers that tell us "I don't know" vs "I kind of know."
 # 
 # ## Global uncertainty over hypotheses
-# - Entropy H[q(v)] over candidate subgraphs/checklists.  [Shannon entropy]
-#   High H => belief is spread thin => we’re uncertain.
-# - Margin: q(top1) - q(top2).                            [cheap proxy]
+# - **Entropy:** H[q(h_t)] over candidate hypotheses (subgraphs/checklists)
+#   - H = -Σ q(h_t) log q(h_t)  [Shannon entropy]
+#   - High H → belief spread thin → high uncertainty
+# - **Margin:** q(top1) - q(top2)
+#   - Small margin → two strong competing hypotheses
+#   - Cheap proxy for uncertainty
 #
 # ## Slot-level uncertainty (known unknowns)
-# - For each required slot r, keep a distribution q(value_r).
-# - Slot entropy H_r: high means we don't know this slot. [ask target]
+# - For each required slot r: maintain distribution q(z_slot_r)
+# - **Slot entropy:** H_r = -Σ q(z_slot_r=v) log q(z_slot_r=v)
+#   - High H_r → don't know this slot → good ASK target
 #
-# ## Model uncertainty vs data noise
-# - Use ensembles or dropout to get variance over scores.  [epistemic]
-# - Use σ² in Gaussian noise for aleatoric uncertainty.    [data noise]
+# ## Epistemic vs aleatoric uncertainty
+# - **Epistemic (model uncertainty):** use ensembles or dropout to get variance over scores
+#   - "We don't know because we haven't seen enough data"
+# - **Aleatoric (data noise):** σ² in likelihood noise model
+#   - "The observation itself is inherently noisy"
 #
-# These metrics drive the meta-decision: answer vs ask vs search.
+# **These metrics drive the decision policy:** ANSWER vs ASK vs SEARCH
 
 # %% [markdown]
 # # Expected Information Gain (EIG) for actions
@@ -440,7 +734,11 @@
 # 
 # ## Actions (kept simple)
 # - ANSWER: say the best answer now. Utility ≈ confidence − risk − delay_cost.
-# - ASK: ask the user a precise question to fill the most uncertain slot.
+# - ASK: ask the user a precise question to fill the most uncertain slot (taking into consideration hybrid policy).
+# EIG under hybrid policy:
+# - Procedural: compute EIG_ASK(r) only for r ∈ EligibleAskSlots; others = 0.
+# - Non-procedural: compute EIG_ASK(r) over all plausible slots; include discriminativeness across top-2 subgraphs.
+# - SEARCH: model outcomes {success, fail} with p_success; on success, observe slot values/prune subgraphs; compute expected entropy drop.
 # - SEARCH (Local): look in the graph/snapshot for facts (low cost/latency).
 # - SEARCH (Web): look on the internet for facts (higher cost/latency).
 #
@@ -470,25 +768,33 @@
 # %% [markdown]
 # # Decision policy (answer vs ask vs search)
 
-# A) Decision policy (core)
-# - State features: [q_top1, margin, H(q_checklist), H(q_subgraph), max_slot_entropy,
+# A) Decision policy
+# Check for procedure-first, otherwise EIG-first
+# - If a procedure is extracted and an active step is identified (z_checklist, z_step not None):
+#     - EligibleAskSlots = { r ∈ REQUIRED(current_checklist) : REQUIRES_r ⊄ filled_slots }
+#     - Score only r ∈ EligibleAskSlots using action-conditioned EIG (ASK) and SEARCH targeting facts that satisfy REQUIRES.
+#     - Add unlock_bonus to actions that satisfy NEXT_IF preconditions.
+# - Else (no procedure applies this turn):
+#     - Compute EIG over discriminative slots (across top-2 subgraphs) without gating.
+#     - Consider SEARCH when EIG_ASK is low or novelty/provenance flags are high.
+#       State features: [q_top1, margin, H(q_checklist), H(q_subgraph), max_slot_entropy,
 #                    OOD flag, provenance score, expected cost(time/$), turn_count]
-# - Actions: {ANSWER, ASK(slot r*), SEARCH(pattern p*)}
-# - Reward: +1 if final answer accepted/correct; -λ_time per turn; -λ_$ per API call; large -C if wrong answer.
+#     - Actions: {ANSWER, ASK(slot r*), SEARCH(pattern p*)}
+#     - Reward: +1 if final answer accepted/correct; -λ_time per turn; -λ_$ per API call; large -C if wrong answer.
 # - Learn with: contextual bandit or tiny actor-critic (2–3 layer MLP). No need to backprop through the graph.
 
 # %% [markdown]
-# # B) Question selection (which slot to ASK)
-#
-# Goal: pick **one** slot to ask that will shrink uncertainty the most (high EIG), without annoying the user.
-# We do this in 6 tidy steps. Then we hand the winner to a tiny LLM to phrase the question.
+# # Hybrid selection:
+# - Procedural mode: rank EligibleAskSlots by score_r = EIG_ASK(r) - cost_r + unlock_bonus.
+# - Non-procedural mode: rank all candidate slots by score_r = EIG_ASK(r) - cost_r (no step-gating: e.g procedural steps).
+# - If all scores ≤ 0 and uncertainty remains, consider SEARCH with p_success, else ANSWER if confident.
 
 # %% [markdown]
 # ## 0) Inputs we already have
 # - Active checklist (from z_checklist top-1).
 # - Candidate subgraphs S_j (from retrieval R) with q(z_subgraph = S_j).
 # - Slot specs (required slots only): allowed types/relations.
-# - u_terms (utterance terms) for light name overlap checks.
+# - o_terms (utterance terms) for light name overlap checks.
 
 # %% [markdown]
 # ## 1) Build a slot table (required slots only)
@@ -506,7 +812,7 @@
 # Simple, fast, no rocket science:
 #   provenance ∈ [0,1]     # mean source reliability along the path
 #   closeness  ∈ [0,1]     # hop distance or PPR weight, normalized
-#   term_match ∈ [0,1]     # quick overlap with u_terms if filler has a name
+#   term_match ∈ [0,1]     # quick overlap with o_terms if filler has a name
 # Local score:
 #   loc(r, v | S_j) = 0.5*provenance + 0.3*closeness + 0.2*term_match
 # If S_j has no filler:
@@ -610,10 +916,10 @@
 
 # %% [markdown]
 # # Crafting the ASK (targeted question design)
-# We don’t ask open-ended essays. We ask for the bit that collapses uncertainty fastest.
+# We don't ask open-ended essays. We ask for the bit that collapses uncertainty fastest.
 # 
 # Steps:
-# - Rank slots by entropy H_r and by impact on distinguishing top hypotheses.  [mutual information with v]
+# - Rank slots by entropy H_r and by impact on distinguishing top hypotheses.  [mutual information with h_t]
 # - Form a concise question that names the slot and offers constrained choices if possible.
 #   Example: "Which product is this about: A, B, or C?"                       [max EIG per token]
 # - Enforce a budget: at most N questions before we must SEARCH or ANSWER.
@@ -633,21 +939,21 @@
 # Confidence scores must mean something.
 # 
 # - Train a small calibration head mapping features → predicted accuracy:
-#   features = [q(top1), margin, H[q(v)], slot completeness, provenance stats].
+#   features = [q(top1), margin, H[q(h_t)], slot completeness, provenance stats].
 # - Use reliability diagrams and ECE to tune thresholds.                       [expected calibration error]
 # - If confidence is miscalibrated in a domain, increase ASK/SEARCH aggressiveness there.
 
 # %% [markdown]
 # # Noise and temperature controls
 # - Gaussian noise σ² controls how forgiving we are to mismatches.            [aleatoric]
-# - Sampling temperature τ controls how peaky the posterior q(v) is.          [exploration vs exploitation]
+# - Sampling temperature τ controls how peaky the posterior q(h_t) is.        [exploration vs exploitation]
 # - Increase σ or τ when text is short, ambiguous, or OOD indicators are high.
 # - Decrease when inputs are long, specific, and matched to priors.
 
 # %% [markdown]
 # # Posterior predictive check (sanity pass before answering)
 # Before committing to ANSWER:
-# - Generate u' from the chosen hypothesis and check it explains key parts of u.
+# - Generate o' from the chosen hypothesis and check it explains key parts of o_t.
 # - If large residual error remains on any critical feature, downgrade to ASK/SEARCH.
 # - This prevents confident nonsense with a 1-line test.
 
@@ -655,25 +961,35 @@
 # # Learning from outcomes (close the loop)
 # - After we ANSWER, track whether the user accepts/corrects it.               [supervision]
 # - After ASK/SEARCH, measure realized entropy drop vs predicted EIG.          [calibrate EIG]
-# - Update priors p(v), slot reliability, and provenance weights over time.    [online learning]
+# - Update priors p(h_t), slot reliability, and provenance weights over time.  [online learning]
 #
 
 # %% [markdown]
 # # Lifecycle of the posterior across turns
-# We keep a belief state b_t ≈ q_t(v) after each turn t. Next turn’s priors come from b_t,
-# tempered by decay and context. Think "Bayesian filtering for dialogue."
+# We maintain a belief state b_t ≈ q_t(h_t) after each turn t.
+# Next turn's priors p_{t+1}(h_{t+1}) are derived from b_t with temporal decay and context.
+# Think: "Bayesian filtering for dialogue."
+# 
+# **MOMDP structure:**
+# - **Observed (x):** checklist, step, filled_slots_this_session, high-provenance facts
+# - **Hidden (y):** unfilled slot values, subgraph_id (top-M), novelty/OOD flag
+# - We maintain belief over y conditioned on x
+# 
+# ## Notation
+# - **b_t** = q_t(h_t): belief state (posterior) at end of turn t
+# - **p_{t+1}(h_{t+1})**: prior distribution for next turn
+# - **h_t** = {z_checklist, z_goal, z_subgraph, {z_slot_r}, z_dialogue_act, z_step, z_novelty}
 
 # %% [markdown]
-# ## 0) Notation
-# - b_t: belief state at end of turn t (your posterior q_t(v))
-# - p_{t+1}: priors for next turn
-# - v = { z_checklist, z_goal, z_subgraph, {z_slot_r}, z_novelty }
-
-# %% [markdown]
-# ## 1) End of turn t: we have q_t(v) and we just acted (ANSWER/ASK/SEARCH)
-# - If ANSWER: mark which subgraph + slots we committed to.
-# - If ASK: we got a user reply → treat it as hard/soft evidence.
-# - If SEARCH: we wrote new facts/provenance → graph changed (great).
+# ## 1) End of turn t: we have q_t(h_t) and we just acted (ANSWER/ASK/SEARCH)
+# - **If ANSWER:** mark which subgraph + slot values we committed to
+# - **If ASK:** we received user reply → treat as hard/soft evidence, update q_t
+# - **If SEARCH:** new facts/provenance added to graph → update available candidates
+# 
+# **Step transitions (observed x):**
+# - If all REQUIRES(current_step) ⊆ filled_slots → advance deterministically via NEXT_IF
+# - Else: stay at current step
+# - Filled slots persist across turns; unknowns remain until ASK/SEARCH resolves them
 
 # %% [markdown]
 # ## 2) What do we persist? (so next turn isn’t amnesic)
@@ -688,7 +1004,6 @@
 # %% [markdown]
 # ## 3) Turn t+1: build priors from yesterday’s beliefs
 # High-level rule: next priors = tempered carryover × base priors × recency/context.
-#
 # For each latent:
 # - p_{t+1}(z_checklist) ∝  (q_t(z_checklist))^ρ  × base_schema_prior × context_boost
 # - p_{t+1}(z_goal)      ∝  (q_t(z_goal))^ρ       × intent_head(history) × Ψ[checklist,goal]
@@ -739,4 +1054,9 @@
 # - Add one discriminative fact between top‑2 subgraphs if margin is thin.
 # - Keep horizon to 2 (occasionally 3) to control cost.
 
-
+# %% [markdown]
+# # Evaluation metrics 
+# 1. Retrieval recall@10 for known entities
+# 2. Uncertainty calibration (Expected Calibration Error on held-out questions not used in training)  
+# 3. Action efficiency (# turns to correct answer vs baseline)
+# 4. Component ablations (what happens if we remove z_dialogue_act and how does that affect system performance?)

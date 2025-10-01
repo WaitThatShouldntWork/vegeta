@@ -152,12 +152,7 @@ class GraphRetriever:
                 logger.debug(f"Query-aware labels detected: {query_labels}")
                 return None, list(set(query_labels))  # Remove duplicates
 
-            # For general queries, don't force a checklist - use general retrieval
-            logger.debug("No specific keywords detected, using general retrieval")
-            return None, ['Film', 'Person', 'MusicTrack', 'Territory', 'Award', 'Year', 'Document']
-
-            # Only use checklist-based approach for checklist-specific queries
-            # (This would be triggered by checklist-specific keywords like "verify rights", "checklist", etc.)
+            # Fallback to checklist-based approach
             # Get all checklist specs
             query = """
             MATCH (ss:SlotSpec)
@@ -187,27 +182,12 @@ class GraphRetriever:
                 # Ultimate fallback: use all common entity types
                 return None, ['Film', 'Person', 'MusicTrack', 'Territory', 'Award', 'Year', 'Document']
 
-            # For general queries that don't match specific keywords,
-            # don't automatically pick a checklist - use general retrieval
-            if not query_labels:
-                logger.debug("No query-specific keywords detected, using general retrieval")
-                return None, ['Film', 'Person', 'MusicTrack', 'Territory', 'Award', 'Year', 'Document']
-
-            # If we have query-specific labels but no perfect checklist match,
-            # still use the query-aware labels rather than forcing a checklist
-            logger.debug(f"Using query-aware target labels: {query_labels}")
-            return None, list(set(query_labels))
-
-            # Only use checklist-based approach if we have specific checklist triggers
-            # (This section should only be reached if we add checklist-specific keywords above)
-
             # Prefer required and cardinality ONE
             def sort_key(x: Dict[str, Any]):
                 return (
                     1 if x["required"] else 0,
                     1 if str(x["cardinality"]).upper() == "ONE" else 0,
-                    -len(x["expect_labels"]),  # fewer labels preferred for specificity
-                    x["name"]  # deterministic tiebreaker
+                    -len(x["expect_labels"])  # fewer labels preferred for specificity
                 )
 
             candidates.sort(key=sort_key, reverse=True)

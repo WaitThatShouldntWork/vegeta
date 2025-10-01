@@ -149,7 +149,7 @@ class VegetaCLI:
         
         return 0
     
-    def run_single_query(self, query: str, verbose: bool = False):
+    def run_single_query(self, query: str):
         """Run a single query and exit"""
         
         if not self.start_system():
@@ -159,24 +159,14 @@ class VegetaCLI:
             # Start session and process query
             session_id = self.system.start_session()
             self._print_header(f"Processing Query: '{query}'")
-
-            if verbose:
-                print("⚡ PROCESSING QUERY...")
-                print(f"  📝 Query: {query}")
-                print(f"  🆔 Session: {session_id}")
-                print("-" * 40)
-
-            response = self.system.process_query(session_id, query, include_internal_state=verbose)
-
-            if verbose:
-                print("\n📊 PROCESSING COMPLETE")
-                print("-" * 40)
-
+            
+            response = self.system.process_query(session_id, query, include_internal_state=True)
+            
             # Display response
             self._display_response(response)
-
-            # Show internal state if available and verbose mode enabled
-            if response.internal_state and verbose:
+            
+            # Show internal state if available
+            if response.internal_state:
                 self._display_internal_state(response.internal_state)
             
         except VegetaError as e:
@@ -437,11 +427,6 @@ def main():
     # Single query mode
     query_parser = subparsers.add_parser('query', help='Process a single query')
     query_parser.add_argument('text', help='Query text to process')
-    query_parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Enable verbose output'
-    )
     
     # Benchmark mode
     benchmark_parser = subparsers.add_parser('benchmark', help='Run benchmark evaluation')
@@ -478,7 +463,7 @@ def main():
     if args.command == 'interactive':
         return cli.run_interactive(verbose=getattr(args, 'verbose', False))
     elif args.command == 'query':
-        return cli.run_single_query(args.text, verbose=getattr(args, 'verbose', False))
+        return cli.run_single_query(args.text)
     elif args.command == 'benchmark':
         return cli.run_benchmark(args.type, args.save, args.verbose)
     else:

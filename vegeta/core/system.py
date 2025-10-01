@@ -183,70 +183,15 @@ class VegetaSystem:
             # Step 7: Uncertainty analysis and decision making
             step_start = time.time()
             decision = self.uncertainty_analyzer.make_decision(
-                posteriors,
-                candidates,
-                observation_u,
+                posteriors, 
+                candidates, 
+                observation_u, 
                 retrieval_context,
                 session_context
             )
             step_time = time.time() - step_start
             self.logger.info(f"⏱️  Step 7 - Uncertainty analysis: {step_time:.2f}s")
-
-            # Handle CONTINUE_INFERENCE action by re-running with enhanced observation
-            if decision.get('action') == 'CONTINUE_INFERENCE':
-                enhanced_observation = decision.get('enhanced_observation')
-                if enhanced_observation:
-                    self.logger.info("🔄 Re-running inference with enhanced observation due to user confirmation")
-
-                    # Re-run extraction and embedding with enhanced observation
-                    enhanced_extraction = self.entity_extractor.extract_entities_llm(
-                        enhanced_observation['u_meta']['utterance']
-                    )
-                    enhanced_observation['u_meta']['extraction'] = enhanced_extraction
-
-                    # Re-run embedding generation
-                    enhanced_observation['u_sem'] = self.embedding_generator.create_u_sem(
-                        enhanced_observation['u_meta']['utterance']
-                    )
-
-                    # Re-run retrieval with enhanced observation
-                    enhanced_retrieval = self.graph_retriever.retrieve_candidates(enhanced_observation)
-                    enhanced_candidates = self.feature_generator.generate_features(
-                        enhanced_retrieval['candidates'],
-                        enhanced_observation
-                    )
-
-                    # Re-run inference with enhanced observation
-                    enhanced_priors = self.prior_builder.build_priors(
-                        enhanced_observation,
-                        session_context,
-                        enhanced_retrieval
-                    )
-
-                    enhanced_posteriors = self.posterior_updater.update_posteriors(
-                        enhanced_candidates,
-                        enhanced_priors,
-                        enhanced_observation
-                    )
-
-                    # Make final decision with enhanced inference
-                    final_decision = self.uncertainty_analyzer.make_decision(
-                        enhanced_posteriors,
-                        enhanced_candidates,
-                        enhanced_observation,
-                        enhanced_retrieval,
-                        session_context
-                    )
-
-                    # Override the original decision with the enhanced one
-                    decision = final_decision
-                    candidates = enhanced_candidates
-                    posteriors = enhanced_posteriors
-                    priors = enhanced_priors
-                    retrieval_context = enhanced_retrieval
-
-                    self.logger.info("✅ Enhanced inference complete - proceeding with confirmed entity context")
-
+            
             # Step 8: Generate response content
             step_start = time.time()
             response_content = self._generate_response_content(decision, candidates, session_context)
@@ -353,10 +298,7 @@ class VegetaSystem:
         if decision['action'] == 'ASK':
             return self.question_generator.generate_question_llm(decision, candidates, session_context)
         elif decision['action'] == 'ANSWER':
-            return self.answer_generator.generate_answer(decision, candidates, session_context)
-        elif decision['action'] == 'CONTINUE_INFERENCE':
-            # Special case: User confirmed something, re-run inference with enhanced observation
-            return f"I understand you mean {decision.get('confirmation_bias', decision['target'])}. Let me find that information for you..."
+            return self.answer_generator.generate_answer(decision, candidates)
         else:  # SEARCH
             return f"Let me search for information about {decision['target']}..."
     
