@@ -2,6 +2,9 @@
 
 A  **Bayesian Active Inference System** implementing complete **predictive coding** architecture for complex conversational interactions and graph-based knowledge retrieval.
 
+## Overview 
+What is better than getting an LLM to say: "I don't know?". It's "Tell me more". Or "I'm uncertain about that, let me go check first". We humans rarely try to one-shot a request and often need to clarify when we're asked a question, so how do we get LLMs and agentic systems to do the same? This project is looking into that.
+
 VEGETA is a working Bayesian active inference prototype with:
 - ✅ **Complete Predictive Coding Pipeline**: Generative model → likelihood → posterior updates
 - ✅ **Three-Channel Predictions**: Semantic, structural, and terms prediction channels
